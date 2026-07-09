@@ -14,21 +14,23 @@ python train_round.py --config configs/debug.py --config.round=1
 
 import json
 import os
+os.environ['WANDB_DATA_DIR'] = '/scratch/tvnguyen/wandb_data'
+
 import sys
 import warnings
-
 warnings.filterwarnings('ignore', category=UserWarning)
 
 from pathlib import Path
 
 import wandb
+import pytorch_lightning as pl
 from absl import flags
 from ml_collections import ConfigDict, config_flags
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.utilities.model_summary import summarize
 
 sys.path.insert(0, os.path.dirname(__file__))
-from tsnpe.state import RunState
+from tsnpe.state import RunState, SEED_OFFSET
 from tsnpe.model_io import build_npe
 from tsnpe import prior
 
@@ -51,6 +53,7 @@ def prepare_data(config, data_path, norm_dict, pre_transforms_config):
         Tuple of (train_loader, val_loader).
     """
     node_feats, graph_feats, _ = datasets.read_graph_dataset(str(data_path), concat=True)
+    seed_data = config.seed + config.round + SEED_OFFSET
 
     train_loader, val_loader, _ = datasets.cartesian.prepare_dataloaders(
         node_feats, graph_feats, prior.PARAM_NAMES,
@@ -59,7 +62,7 @@ def prepare_data(config, data_path, norm_dict, pre_transforms_config):
         eval_batch_size=config.training.eval_batch_size,
         train_frac=config.training.train_frac,
         num_workers=config.training.num_workers,
-        seed=config.seed,
+        seed=seed_data,
         norm_dict=norm_dict,
         pre_transform_kwargs=pre_transforms_config,
     )
@@ -168,6 +171,8 @@ def main(config):
         config.training, project_dir, callbacks, wandb_logger, num_sanity_val_steps=0)
 
     print(f'[Model] Warm-starting from round {r - 1}: {prev_checkpoint}')
+    seed_training = config.seed + r + SEED_OFFSET * 2
+    pl.seed_everything(seed_training)
     training.fit(
         trainer, model, train_loader, val_loader,
         checkpoint_path=str(prev_checkpoint), reset_optimizer=True)

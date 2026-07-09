@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 STATE_FILENAME = 'state.json'
-
+SEED_OFFSET = 100000  # avoiding seed collision between sim and train round
 
 def sha256_file(path: Path, chunk_size: int = 2 ** 20) -> str:
     """Compute the sha256 hex digest of a file.
