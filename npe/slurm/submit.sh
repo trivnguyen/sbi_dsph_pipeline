@@ -74,7 +74,7 @@ RUN_DIR="$LOG_ROOT/$CONFIG_NAME/$RUN_ID"
 mkdir -p "$RUN_DIR"
 cp -- "$CONFIG_ABS" "$RUN_DIR/config_snapshot.py"
 
-JGNN_COMMIT="$(git -C "$NPE_DIR/../jgnn" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+JGNN_COMMIT="$(git -C /home/tvnguyen/projects/sbi_dsph/jgnn rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 {
     echo "submitted_at:    $(date '+%Y-%m-%d %H:%M:%S')"

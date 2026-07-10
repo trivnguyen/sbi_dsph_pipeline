@@ -37,7 +37,7 @@ EXTRA_ARGS=("$@")
 # Not self-located via $BASH_SOURCE: SLURM runs a copy of this script from
 # a spool dir, so that would resolve to the wrong directory. submit.sh
 # exports NPE_DIR correctly; this fallback is only for direct `sbatch` use.
-NPE_DIR="${NPE_DIR:-/home/tvnguyen/projects/sbi_dsph/npe}"
+NPE_DIR="${NPE_DIR:-/home/tvnguyen/projects/sbi_dsph/sbi_dsph_pipeline/npe}"
 RUN_DIR="${RUN_DIR:-/scratch/tvnguyen/slurm_logs/npe/manual/${SLURM_JOB_NAME}_${SLURM_JOB_ID}}"
 MANIFEST="$RUN_DIR/manifest.txt"
 mkdir -p "$RUN_DIR"
@@ -68,7 +68,7 @@ log "cpus:         ${SLURM_CPUS_PER_TASK:-unknown}"
 log "mem:          ${SLURM_MEM_PER_NODE:-unknown} MB"
 log "config:       $CONFIG"
 log "extra_args:   ${EXTRA_ARGS[*]:-<none>}"
-log "jgnn commit:  $(git -C "$NPE_DIR/../jgnn" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+log "jgnn commit:  $(git -C /home/tvnguyen/projects/sbi_dsph/jgnn rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 cp -- "$CONFIG" "$RUN_DIR/config_snapshot.py" 2>/dev/null || true
 
