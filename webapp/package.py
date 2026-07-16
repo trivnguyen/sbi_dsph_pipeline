@@ -160,6 +160,26 @@ ignored, required true, or required false).
 `example_catalog.csv` is a small synthetic file in the right format -
 try it with R_half = 0.2 kpc.
 
+## Selecting rows
+
+Two more filters sit under the upload box, and combine with everything
+above (all cuts are ANDed):
+
+- **Row filter** - a [pandas query](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html)
+  expression over your file's columns, e.g. `key == "draco_1"`,
+  `mem_prob > 0.8 and good_star`, `key in ["draco_1", "bootes_1"]`.
+  One file holding several systems is the main use: the filter picks
+  the one to fit, and the center, distance, and systemic velocity are
+  then measured from just those stars. In compare mode dataset B can
+  reuse A's file with a different filter, so A vs B can be two systems
+  out of one catalog.
+- **Radius cut** - min/max on the projected radius from the center, in
+  kpc or arcmin.
+
+The projected radius is also available to the row filter as `R_kpc` and
+`R_arcmin` (e.g. `R_kpc < 5`). These are computed from the center, so
+they replace same-named columns in your file.
+
 ## System metadata
 
 The half-light radius **R_half [kpc]** is required - the model

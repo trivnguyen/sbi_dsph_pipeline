@@ -10,6 +10,14 @@ membership-probability column (threshold cut) and arbitrarily-named
 boolean "flag" columns (each can be ignored, required True, or required
 False).
 
+Two further row filters apply on top, and combine with the above (all
+cuts are ANDed): a free-form `DataFrame.query` expression over the
+file's own columns (e.g. `key == "draco_1"` to pull one system out of a
+multi-system catalog), and a projected-radius cut in kpc or arcmin.
+Radius is derived rather than read from the file, and is exposed to the
+query as the reserved `R_kpc`/`R_arcmin` columns - see `build_target`
+for the ordering constraint this creates.
+
 System-level metadata the model needs but a per-star table can't carry
 (half-light radius + uncertainty for the conditioning prior, center,
 systemic velocity, proper motion for the perspective correction) comes
@@ -18,6 +26,7 @@ defaults where possible (center/systemic velocity from the member stars
 themselves).
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -52,6 +61,18 @@ COLUMN_ALIASES = {
                  'pmember', 'membership'),
 }
 REQUIRED_ROLES = ('ra', 'dec', 'vr', 'vr_err')
+
+# Derived projected-radius columns injected into the catalog before the
+# radius cut, so a custom query can filter on radius too. These names
+# are reserved - a same-named column in the uploaded file is replaced.
+RADIUS_KPC_COL = 'R_kpc'
+RADIUS_ARCMIN_COL = 'R_arcmin'
+RADIUS_UNITS = ('kpc', 'arcmin')
+
+# Passes allowed when resolving a radius-based query against the center
+# it depends on (see _select_by_radius_query); a sane filter settles in
+# two or three.
+_MAX_QUERY_PASSES = 6
 
 _TRUE_STRINGS = {'true', 't', 'yes', 'y', '1'}
 _FALSE_STRINGS = {'false', 'f', 'no', 'n', '0'}
@@ -163,6 +184,87 @@ def _median_center(ra_deg: np.ndarray, dec_deg: np.ndarray) -> tuple:
     return float(ra_center), float(np.median(dec_deg))
 
 
+def query_uses_radius(query: str) -> bool:
+    """Whether a query expression references a derived radius column.
+
+    Such a query can only run once the center/distance are known, so it
+    is deferred until after the radius columns are injected (see
+    `build_target`); queries on the file's own columns run before, since
+    they are what selects the system an auto-center is derived from.
+    """
+    return any(
+        re.search(rf'\b{re.escape(name)}\b', query)
+        for name in (RADIUS_KPC_COL, RADIUS_ARCMIN_COL)
+    )
+
+
+def _query_rows(data: pd.DataFrame, query: str) -> pd.DataFrame:
+    """Evaluate a query expression, allowing an empty result.
+
+    Raises:
+        ValueError: If the expression is invalid or names an unknown
+            column.
+    """
+    try:
+        return data.query(query)
+    except Exception as e:
+        raise ValueError(
+            f'Could not evaluate the row filter {query!r}: {e}. '
+            f'Available columns: {[str(c) for c in data.columns]}')
+
+
+def apply_query(data: pd.DataFrame, query: str) -> pd.DataFrame:
+    """Filter rows with a pandas `DataFrame.query` expression.
+
+    Args:
+        data: Catalog rows to filter.
+        query: Expression over the catalog's columns, e.g.
+            `key == "draco_1"` or `mem_prob > 0.8 and R_kpc < 5`.
+
+    Returns:
+        The matching rows.
+
+    Raises:
+        ValueError: If the expression is invalid, names an unknown
+            column, or matches no rows.
+    """
+    out = _query_rows(data, query)
+    if len(out) == 0:
+        raise ValueError(f'No stars match the row filter {query!r}.')
+    return out
+
+
+def _apply_radius_cut(
+    data: pd.DataFrame, radius_min: float, radius_max: float,
+    radius_unit: str,
+) -> pd.DataFrame:
+    """Keep rows whose projected radius is within [min, max] in the
+    chosen unit (either bound may be None). Assumes the derived radius
+    columns are already present.
+    """
+    if radius_min is None and radius_max is None:
+        return data
+    unit = (radius_unit or 'kpc').lower()
+    if unit not in RADIUS_UNITS:
+        raise ValueError(
+            f'Unknown radius unit {radius_unit!r} - use one of '
+            f'{list(RADIUS_UNITS)}.')
+    radius = data[
+        RADIUS_KPC_COL if unit == 'kpc' else RADIUS_ARCMIN_COL
+    ].to_numpy()
+    keep = np.ones(len(data), dtype=bool)
+    if radius_min is not None:
+        keep &= radius >= radius_min
+    if radius_max is not None:
+        keep &= radius <= radius_max
+    out = data[keep]
+    if len(out) == 0:
+        raise ValueError(
+            f'No stars left after the radius cut '
+            f'[{radius_min}, {radius_max}] {unit}.')
+    return out
+
+
 def resolve_mapping(df: pd.DataFrame, columns: dict = None) -> dict:
     """Final role -> column mapping: auto-detection plus user choices.
 
@@ -201,6 +303,116 @@ def resolve_mapping(df: pd.DataFrame, columns: dict = None) -> dict:
     return mapping
 
 
+def _derive_metadata(
+    data: pd.DataFrame, mapping: dict, center_ra_deg: float,
+    center_dec_deg: float, distance_kpc: float,
+    vlos_systemic_kms: float,
+) -> tuple:
+    """Fill the data-driven metadata defaults from `data`.
+
+    Explicitly supplied values pass through untouched; only the None
+    ones are estimated from the stars.
+
+    Returns:
+        (center_ra_deg, center_dec_deg, distance_kpc,
+        vlos_systemic_kms).
+
+    Raises:
+        ValueError: If no distance is available at all.
+    """
+    if distance_kpc is None:
+        if 'distance' in mapping:
+            distance_kpc = float(np.nanmedian(
+                data[mapping['distance']].to_numpy().astype(float)))
+        elif 'dm' in mapping:
+            dm = float(np.nanmedian(
+                data[mapping['dm']].to_numpy().astype(float)))
+            distance_kpc = 10.0 ** (dm / 5.0 - 2.0)
+        else:
+            raise ValueError(
+                'Catalog has no distance/dm column - provide the '
+                'system distance explicitly.')
+    if center_ra_deg is None or center_dec_deg is None:
+        auto_ra, auto_dec = _median_center(
+            data[mapping['ra']].to_numpy().astype(float),
+            data[mapping['dec']].to_numpy().astype(float))
+        center_ra_deg = auto_ra if center_ra_deg is None else center_ra_deg
+        center_dec_deg = (auto_dec if center_dec_deg is None
+                          else center_dec_deg)
+    if vlos_systemic_kms is None:
+        vlos_systemic_kms = float(np.nanmedian(
+            data[mapping['vr']].to_numpy().astype(float)))
+    return center_ra_deg, center_dec_deg, distance_kpc, vlos_systemic_kms
+
+
+def _add_radius_columns(
+    data: pd.DataFrame, mapping: dict, center_ra_deg: float,
+    center_dec_deg: float, distance_kpc: float,
+) -> pd.DataFrame:
+    """Return a copy of `data` with the derived radius columns, using
+    the same small-angle convention as the preprocessing step that
+    later recomputes R_proj for the surviving stars.
+    """
+    data = data.copy()
+    data[RADIUS_KPC_COL] = data_utils.calc_projected_radius(
+        data[mapping['ra']].to_numpy().astype(float),
+        data[mapping['dec']].to_numpy().astype(float),
+        center_ra_deg, center_dec_deg, distance_kpc)
+    data[RADIUS_ARCMIN_COL] = np.rad2deg(
+        data[RADIUS_KPC_COL].to_numpy() / distance_kpc) * 60.0
+    return data
+
+
+def _select_by_radius_query(
+    base: pd.DataFrame, query: str, mapping: dict, center_ra_deg: float,
+    center_dec_deg: float, distance_kpc: float,
+    vlos_systemic_kms: float,
+) -> pd.DataFrame:
+    """Resolve a query that filters on radius, where the selection and
+    the center are mutually dependent.
+
+    Radius is measured from the center, but an auto center (and
+    distance, and systemic velocity) is the median of whichever stars
+    the query selects - so neither can be computed first. Iterate to a
+    fixed point instead: estimate the metadata from the current
+    selection, re-run the query with radii from it, and stop once the
+    selection stops changing.
+
+    The seed matters. Starting from every star would measure the center
+    of a multi-system catalog off the majority system, putting a
+    minority one thousands of arcmin away and letting an upper-bound
+    radius term reject it outright - before the loop could correct the
+    center. So seed by evaluating the query with radius standing in as
+    zero, which admits everything on an upper-bound term and lets the
+    query's other predicates (`key == "bootes_1"`) pick the system. A
+    lower-bound-only radius term selects nothing that way, so fall back
+    to every star and let the loop try.
+
+    Raises:
+        ValueError: If the selection never settles.
+    """
+    seed = base.copy()
+    seed[RADIUS_KPC_COL] = 0.0
+    seed[RADIUS_ARCMIN_COL] = 0.0
+    selected = _query_rows(seed, query)
+    if len(selected) == 0:
+        selected = base
+    for _ in range(_MAX_QUERY_PASSES):
+        c_ra, c_dec, dist, _ = _derive_metadata(
+            selected, mapping, center_ra_deg, center_dec_deg,
+            distance_kpc, vlos_systemic_kms)
+        nxt = apply_query(
+            _add_radius_columns(base, mapping, c_ra, c_dec, dist), query)
+        if nxt.index.equals(selected.index):
+            return nxt
+        selected = nxt
+    raise ValueError(
+        f'Could not settle on a center for the radius-based row filter '
+        f'{query!r}: the stars it selects and the center they imply '
+        f'keep changing. Set the center (and distance) explicitly, or '
+        f'move the radius part into the radius-cut boxes.')
+
+
 def build_target(
     df: pd.DataFrame,
     label: str,
@@ -218,6 +430,10 @@ def build_target(
     mem_prob_min: float = None,
     flag_requirements: dict = None,
     apply_perspective_corr: bool = True,
+    query: str = None,
+    radius_min: float = None,
+    radius_max: float = None,
+    radius_unit: str = 'kpc',
 ) -> tuple[TargetData, dict]:
     """Build a TargetData snapshot from a fixed-format user catalog.
 
@@ -249,6 +465,19 @@ def build_target(
         apply_perspective_corr: Apply the full perspective-rotation
             correction (needs both proper motions); otherwise only the
             systemic velocity is subtracted.
+        query: Optional `DataFrame.query` expression selecting the
+            member stars, e.g. `key == "draco_1"`. It may reference the
+            file's own columns and the derived `R_kpc`/`R_arcmin`
+            columns. It defines the sample every data-driven default
+            below is measured from, so picking one system out of a
+            multi-system catalog here also gives that system's center,
+            distance, and systemic velocity. A query that filters on
+            radius is resolved against the center it implies (see
+            `_select_by_radius_query`).
+        radius_min: Optional lower projected-radius cut, in
+            `radius_unit`.
+        radius_max: Optional upper projected-radius cut.
+        radius_unit: Unit for radius_min/radius_max: 'kpc' or 'arcmin'.
 
     Returns:
         (target, info) - the TargetData snapshot plus a JSON-friendly
@@ -257,8 +486,8 @@ def build_target(
 
     Raises:
         ValueError: If required columns are missing, no distance is
-            available, an unknown flag column is named, or every star is
-            cut.
+            available, an unknown flag column is named, the query is
+            invalid, or every star is cut.
     """
     mapping = resolve_mapping(df, columns)
 
@@ -268,42 +497,44 @@ def build_target(
             raise ValueError(f'Unknown flag column: {column!r}')
         mask &= _flag_values(df[column]) == bool(required)
 
-    mem_prob = None
-    if 'mem_prob' in mapping:
-        mem_prob = df[mapping['mem_prob']].to_numpy().astype(float)
-        if mem_prob_min is not None:
-            mask &= np.nan_to_num(mem_prob) > mem_prob_min
+    if 'mem_prob' in mapping and mem_prob_min is not None:
+        mask &= np.nan_to_num(
+            df[mapping['mem_prob']].to_numpy().astype(float)
+        ) > mem_prob_min
     data = df[mask]
     if len(data) == 0:
         raise ValueError('All stars removed by flag/membership cuts.')
+
+    # The query defines the member sample, so it runs before any
+    # data-driven metadata: in a multi-system catalog it is what picks
+    # the object the center/distance/systemic velocity describe.
+    query = (query or '').strip()
+    if query:
+        data = (
+            _select_by_radius_query(
+                data, query, mapping, center_ra_deg, center_dec_deg,
+                distance_kpc, vlos_systemic_kms)
+            if query_uses_radius(query)
+            else apply_query(data, query))
+
+    center_ra_deg, center_dec_deg, distance_kpc, vlos_systemic_kms = (
+        _derive_metadata(data, mapping, center_ra_deg, center_dec_deg,
+                         distance_kpc, vlos_systemic_kms))
+
+    # Radius comes last and never feeds back into the metadata above:
+    # the center is a property of the member sample, not of whichever
+    # annulus the cut happens to keep.
+    data = _add_radius_columns(
+        data, mapping, center_ra_deg, center_dec_deg, distance_kpc)
+    data = _apply_radius_cut(data, radius_min, radius_max, radius_unit)
 
     ra = data[mapping['ra']].to_numpy().astype(float)
     dec = data[mapping['dec']].to_numpy().astype(float)
     vr = data[mapping['vr']].to_numpy().astype(float)
     vr_err = data[mapping['vr_err']].to_numpy().astype(float)
-    mem_prob = (mem_prob[mask] if mem_prob is not None
-                else np.ones(len(data)))
-
-    if distance_kpc is None:
-        if 'distance' in mapping:
-            distance_kpc = float(np.nanmedian(
-                data[mapping['distance']].to_numpy().astype(float)))
-        elif 'dm' in mapping:
-            dm = float(np.nanmedian(
-                data[mapping['dm']].to_numpy().astype(float)))
-            distance_kpc = 10.0 ** (dm / 5.0 - 2.0)
-        else:
-            raise ValueError(
-                'Catalog has no distance/dm column - provide the '
-                'system distance explicitly.')
-
-    if center_ra_deg is None or center_dec_deg is None:
-        auto_ra, auto_dec = _median_center(ra, dec)
-        center_ra_deg = auto_ra if center_ra_deg is None else center_ra_deg
-        center_dec_deg = (auto_dec if center_dec_deg is None
-                          else center_dec_deg)
-    if vlos_systemic_kms is None:
-        vlos_systemic_kms = float(np.nanmedian(vr))
+    mem_prob = (
+        data[mapping['mem_prob']].to_numpy().astype(float)
+        if 'mem_prob' in mapping else np.ones(len(data)))
 
     # The perspective correction needs a systemic proper motion; without
     # one, quietly fall back to plain systemic-velocity subtraction.
@@ -346,6 +577,7 @@ def build_target(
         rhalf_kpc_em=float(rhalf_kpc_em),
         rhalf_kpc_ep=float(rhalf_kpc_ep),
     )
+    has_radius_cut = radius_min is not None or radius_max is not None
     info = dict(
         n_uploaded=int(len(df)),
         n_after_cuts=int(len(ra)),
@@ -355,5 +587,9 @@ def build_target(
         vlos_systemic_kms=float(vlos_systemic_kms),
         perspective_corr_applied=use_corr,
         rhalf_kpc=float(rhalf_kpc),
+        query=query or None,
+        radius_min=radius_min,
+        radius_max=radius_max,
+        radius_unit=(radius_unit or 'kpc') if has_radius_cut else None,
     )
     return target, info

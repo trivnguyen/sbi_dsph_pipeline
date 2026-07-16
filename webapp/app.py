@@ -237,6 +237,10 @@ def run(payload: dict):
                 flag_requirements=payload.get('flags') or {},
                 apply_perspective_corr=bool(
                     payload.get('apply_perspective_corr', True)),
+                query=payload.get('query'),
+                radius_min=_opt_float(payload.get('radius_min')),
+                radius_max=_opt_float(payload.get('radius_max')),
+                radius_unit=payload.get('radius_unit') or 'kpc',
             )
 
             n_samples = int(payload.get('n_samples') or 1000)

@@ -177,8 +177,13 @@ Add HTTPS with `certbot --nginx`.
 ### Access control
 
 The app has no login of its own. Anyone who can reach the URL can
-submit compute jobs on your server, so if the page is public, gate it
-at the proxy:
+submit compute jobs on your server — and the catalog "Row filter" box
+hands them a pandas `query` expression evaluated server-side. That
+parser only accepts a restricted expression grammar (no imports, calls,
+or attribute access), so it is not a shell, but it is still untrusted
+input evaluated on your box: treat reaching the page as equivalent to
+being allowed to run analysis jobs on it. If the page is public, gate
+it at the proxy:
 
 ```nginx
 location /dsph/ {

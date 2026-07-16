@@ -330,6 +330,14 @@ function hexToRgba(hex, a) {
   return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
 }
 
+// User-typed text (the row-filter query) reaches the summary table via
+// innerHTML, so escape it rather than letting it parse as markup.
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = String(s);
+  return div.innerHTML;
+}
+
 function fmt(x, digits = 3) {
   if (x === null || x === undefined || isNaN(x)) return '';
   const a = Math.abs(x);
@@ -394,6 +402,44 @@ function datasetPanelHTML(ds) {
                    value="0.8"></label>
         </div>
         <div id="${ds}_flagsBox" style="margin-top:10px"></div>
+      </div>
+
+      <div style="margin-top:12px">
+        <p class="hint" style="margin-bottom:6px"><b>Row filter</b>
+          (optional) — a
+          <a href="https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html"
+             target="_blank" rel="noopener">pandas query</a>
+          expression over your file's columns. Use it to pick one system
+          out of a multi-object catalog.</p>
+        <input type="text" id="${ds}_query"
+               placeholder='e.g. key == "draco_1"'>
+        <p class="hint">Examples:
+          <code>key == "draco_1"</code>,
+          <code>mem_prob &gt; 0.8 and good_star</code>,
+          <code>key in ["draco_1", "bootes_1"]</code>.
+          The projected radius is available as <code>R_kpc</code> /
+          <code>R_arcmin</code> (e.g. <code>R_kpc &lt; 5</code>) —
+          these are computed, so they override same-named file columns.
+          All filters here are combined with the cuts above.</p>
+      </div>
+
+      <div style="margin-top:10px">
+        <p class="hint" style="margin-bottom:6px"><b>Radius cut</b>
+          (optional) — on the projected radius from the center. Leave a
+          box blank for no cut on that side.</p>
+        <div class="grid3">
+          <label class="field"><span>R min</span>
+            <input type="number" id="${ds}_radius_min" step="any"
+                   placeholder="none"></label>
+          <label class="field"><span>R max</span>
+            <input type="number" id="${ds}_radius_max" step="any"
+                   placeholder="none"></label>
+          <label class="field"><span>Unit</span>
+            <select id="${ds}_radius_unit">
+              <option value="kpc" selected>kpc</option>
+              <option value="arcmin">arcmin</option>
+            </select></label>
+        </div>
       </div>
     </fieldset>
 
@@ -655,7 +701,10 @@ function collectPayload(ds) {
     'center_ra_deg', 'center_dec_deg', 'distance_kpc',
     'vlos_systemic_kms', 'pmra_masyr', 'pmdec_masyr', 'vlos_abs_max',
     'n_samples', 'batch_size', 'n_profile_samples', 'n_bins',
-    'gamma_min', 'gamma_max'];
+    'gamma_min', 'gamma_max',
+    // Per-dataset (not per-catalog): dataset B can reuse A's file while
+    // filtering to a different system / radius range.
+    'query', 'radius_min', 'radius_max', 'radius_unit'];
   const cols = currentMapping(src);
   const p = {
     upload_id: ST[src].uploadId,
@@ -691,11 +740,22 @@ function summaryTable(ds, s) {
   const postCell = (gcut || (req && req !== kept))
     ? `${kept} of ${req || kept}${gcut}`
     : `${kept}`;
+  const filters = [];
+  if (i.query) filters.push(`<code>${escapeHtml(i.query)}</code>`);
+  if (i.radius_unit) {
+    filters.push(`R ∈ [${i.radius_min != null ? fmt(i.radius_min) : '−∞'},`
+      + ` ${i.radius_max != null ? fmt(i.radius_max) : '∞'}]`
+      + ` ${i.radius_unit}`);
+  }
+  const filterRow = filters.length
+    ? `<tr><td>Row filter</td><td>${filters.join('<br>')}</td></tr>`
+    : '';
   return `<table class="summary">
       <tr><th colspan="2" style="color:${DS_COLOR[ds]}">
         ${s.label} &nbsp;(dataset ${ds})</th></tr>
       <tr><td>Stars used</td>
           <td>${i.n_after_cuts} of ${i.n_uploaded} uploaded</td></tr>
+      ${filterRow}
       <tr><td>Center / distance</td>
           <td>(${fmt(i.center_ra_deg, 6)}, ${fmt(i.center_dec_deg, 6)})
               deg · ${fmt(i.distance_kpc)} kpc</td></tr>
