@@ -417,29 +417,12 @@ function datasetPanelHTML(ds) {
           <code>key == "draco_1"</code>,
           <code>mem_prob &gt; 0.8 and good_star</code>,
           <code>key in ["draco_1", "bootes_1"]</code>.
-          The projected radius is available as <code>R_kpc</code> /
-          <code>R_arcmin</code> (e.g. <code>R_kpc &lt; 5</code>) —
-          these are computed, so they override same-named file columns.
-          All filters here are combined with the cuts above.</p>
-      </div>
-
-      <div style="margin-top:10px">
-        <p class="hint" style="margin-bottom:6px"><b>Radius cut</b>
-          (optional) — on the projected radius from the center. Leave a
-          box blank for no cut on that side.</p>
-        <div class="grid3">
-          <label class="field"><span>R min</span>
-            <input type="number" id="${ds}_radius_min" step="any"
-                   placeholder="none"></label>
-          <label class="field"><span>R max</span>
-            <input type="number" id="${ds}_radius_max" step="any"
-                   placeholder="none"></label>
-          <label class="field"><span>Unit</span>
-            <select id="${ds}_radius_unit">
-              <option value="kpc" selected>kpc</option>
-              <option value="arcmin">arcmin</option>
-            </select></label>
-        </div>
+          The projected radius is also available as <code>R_kpc</code> /
+          <code>R_arcmin</code> (e.g. <code>R_kpc &lt; 5</code>) — it is
+          computed from the center below, so it overrides a same-named
+          file column. For a plain radius cut, prefer the R_proj boxes
+          in <b>System</b>. All filters here combine with the cuts
+          above.</p>
       </div>
     </fieldset>
 
@@ -488,6 +471,17 @@ function datasetPanelHTML(ds) {
         <label class="field"><span>pmdec [mas/yr]</span>
           <input type="number" id="${ds}_pmdec_masyr" step="any"
                  placeholder="none"></label>
+        <label class="field"><span>R_proj min</span>
+          <input type="number" id="${ds}_radius_min" step="any"
+                 placeholder="no cut"></label>
+        <label class="field"><span>R_proj max</span>
+          <input type="number" id="${ds}_radius_max" step="any"
+                 placeholder="no cut"></label>
+        <label class="field"><span>R_proj unit</span>
+          <select id="${ds}_radius_unit">
+            <option value="kpc" selected>kpc</option>
+            <option value="arcmin">arcmin</option>
+          </select></label>
         <label class="field"><span>|v − v_sys| max [km/s]</span>
           <input type="number" id="${ds}_vlos_abs_max" step="any"
                  placeholder="no cut"></label>
@@ -497,6 +491,11 @@ function datasetPanelHTML(ds) {
             <option value="">off (subtract v_sys only)</option>
           </select></label>
       </div>
+      <p class="hint" style="margin-bottom:0">The last rows are cuts and
+        corrections derived from the values above, not columns read from
+        the file: <b>R_proj</b> is each star's projected radius from the
+        center, and <b>|v − v_sys|</b> its velocity offset. Blank means
+        no cut.</p>
     </fieldset>
 
     <fieldset>
@@ -699,12 +698,13 @@ function collectPayload(ds) {
   const src = catalogSource(ds);
   const ids = ['label', 'rhalf_kpc', 'rhalf_kpc_em', 'rhalf_kpc_ep',
     'center_ra_deg', 'center_dec_deg', 'distance_kpc',
-    'vlos_systemic_kms', 'pmra_masyr', 'pmdec_masyr', 'vlos_abs_max',
+    'vlos_systemic_kms', 'pmra_masyr', 'pmdec_masyr',
+    'radius_min', 'radius_max', 'radius_unit', 'vlos_abs_max',
     'n_samples', 'batch_size', 'n_profile_samples', 'n_bins',
     'gamma_min', 'gamma_max',
-    // Per-dataset (not per-catalog): dataset B can reuse A's file while
-    // filtering to a different system / radius range.
-    'query', 'radius_min', 'radius_max', 'radius_unit'];
+    // Read per-dataset despite sitting in the catalog block, which B can
+    // otherwise share wholesale: B reuses A's file, its own filter.
+    'query'];
   const cols = currentMapping(src);
   const p = {
     upload_id: ST[src].uploadId,

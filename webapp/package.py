@@ -162,10 +162,11 @@ try it with R_half = 0.2 kpc.
 
 ## Selecting rows
 
-Two more filters sit under the upload box, and combine with everything
-above (all cuts are ANDed):
+Two more filters are available, and combine with everything above (all
+cuts are ANDed):
 
-- **Row filter** - a [pandas query](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html)
+- **Row filter**, under the upload box - a
+  [pandas query](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html)
   expression over your file's columns, e.g. `key == "draco_1"`,
   `mem_prob > 0.8 and good_star`, `key in ["draco_1", "bootes_1"]`.
   One file holding several systems is the main use: the filter picks
@@ -173,8 +174,11 @@ above (all cuts are ANDed):
   then measured from just those stars. In compare mode dataset B can
   reuse A's file with a different filter, so A vs B can be two systems
   out of one catalog.
-- **Radius cut** - min/max on the projected radius from the center, in
-  kpc or arcmin.
+- **R_proj min/max**, in the System section next to `|v - v_sys| max` -
+  a cut on each star's projected radius from the center, in kpc or
+  arcmin. It sits there rather than with the catalog because, like the
+  velocity cut, it is computed from the system values above it rather
+  than read from a column.
 
 The projected radius is also available to the row filter as `R_kpc` and
 `R_arcmin` (e.g. `R_kpc < 5`). These are computed from the center, so
