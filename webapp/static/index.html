@@ -229,6 +229,11 @@
       </div>
     </fieldset>
 
+    <div class="btnrow" id="plotToolbar"
+         style="display:none; justify-content:flex-end; margin:0 0 6px">
+      <button id="copyPlotBtn" class="secondary small">
+        Copy plot image</button>
+    </div>
     <div id="profilesPlot" style="display:none"></div>
     <p class="hint" id="plotCaption" style="display:none">
       Solid line = posterior median. Shaded bands = credible intervals
@@ -1121,6 +1126,62 @@ function autoscaleAll() {
   Plotly.relayout(gd, upd).then((g) => syncAxisInputs(g));
 }
 
+// --- copy plot images to clipboard ---------------------------------------
+// Briefly show a status on the button (e.g. "Copied!") then restore it.
+function flashButton(btn, msg) {
+  if (!btn || btn.dataset.busy) return;
+  btn.dataset.busy = '1';
+  const old = btn.textContent;
+  btn.textContent = msg;
+  btn.disabled = true;
+  setTimeout(() => {
+    btn.textContent = old;
+    btn.disabled = false;
+    delete btn.dataset.busy;
+  }, 1400);
+}
+
+async function copyPngBlob(blob, btn) {
+  // Clipboard image write needs a secure context (https or localhost)
+  // and ClipboardItem support; fall back to a clear message otherwise.
+  try {
+    if (!navigator.clipboard || !window.ClipboardItem) {
+      throw new Error('Clipboard image API unavailable in this browser '
+        + '/ context.');
+    }
+    await navigator.clipboard.write(
+      [new ClipboardItem({ 'image/png': blob })]);
+    flashButton(btn, 'Copied!');
+  } catch (e) {
+    flashButton(btn, 'Copy failed');
+    showError('Could not copy the image to the clipboard: ' + e.message
+      + '\nThis needs a secure context (https, or http://localhost) and '
+      + 'a supporting browser. Use the plot’s camera button or a '
+      + 'right-click “Copy image” instead.');
+  }
+}
+
+async function copyProfilePlot(btn) {
+  const gd = $('profilesPlot');
+  if (!gd || !gd._fullLayout) return;
+  try {
+    const url = await Plotly.toImage(gd, {
+      format: 'png', scale: 2,
+      width: gd._fullLayout.width, height: gd._fullLayout.height });
+    await copyPngBlob(await (await fetch(url)).blob(), btn);
+  } catch (e) {
+    flashButton(btn, 'Copy failed');
+    showError('Could not render the plot image: ' + e.message);
+  }
+}
+
+async function copyCornerImage(ds, btn) {
+  const img = document.querySelector(`#cornerRow img[data-ds="${ds}"]`);
+  if (!img) return;
+  // The corner src is a data: URL; fetch turns it back into a blob.
+  await copyPngBlob(await (await fetch(img.src)).blob(), btn);
+}
+
 // --- corner plot ---------------------------------------------------------
 function cornerOptions() {
   const smooth = parseFloat($('corner_smooth').value);
@@ -1197,11 +1258,14 @@ async function onRun() {
     $('layoutBox').style.display = 'block';
     $('axisBox').style.display = 'block';
     $('cornerBox').style.display = 'block';
+    $('plotToolbar').style.display = 'flex';
     $('plotCaption').style.display = 'block';
     await renderPlot();
     $('cornerRow').innerHTML = datasets.map((ds) =>
       `<div class="corner-col"><h3 style="color:${DS_COLOR[ds]}">
-         ${ST[ds].result.summary.label} — posterior corner</h3>
+         ${ST[ds].result.summary.label} — posterior corner
+         <button class="secondary small copy-corner" data-ds="${ds}"
+                 style="margin-left:8px">Copy image</button></h3>
        <img src="${ST[ds].result.corner_png}" alt="corner ${ds}"
             data-ds="${ds}"></div>`)
       .join('');
@@ -1255,6 +1319,15 @@ function initDatasets() {
   // button; only show/hide is instant.
   $('corner_show').addEventListener('change', applyCornerVisibility);
   $('updateCornerBtn').addEventListener('click', updateCorners);
+
+  // Copy plot images to the clipboard. The corner row is rebuilt each
+  // run, so its buttons are handled by delegation.
+  $('copyPlotBtn').addEventListener('click',
+    (e) => copyProfilePlot(e.currentTarget));
+  $('cornerRow').addEventListener('click', (e) => {
+    const btn = e.target.closest('.copy-corner');
+    if (btn) copyCornerImage(btn.dataset.ds, btn);
+  });
 }
 
 // --- startup -------------------------------------------------------------
