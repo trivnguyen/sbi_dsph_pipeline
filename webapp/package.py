@@ -192,6 +192,14 @@ data-driven medians when left blank; proper motions are only needed
 for the perspective-rotation correction. Systems in the bundled
 local_volume_database snapshot can be prefilled by key.
 
+On upload the app tries to **auto-detect** which known system your
+catalog is and prefills the metadata for you - by a system-name column
+if present (e.g. a `key` column holding `draco_1`), otherwise by
+matching the field's sky position to the nearest known center. It's
+always overridable: edit the key and click Prefill, or just edit the
+fields. A file spanning several known systems isn't auto-picked; use
+the row filter to choose one.
+
 ## Swapping in another model
 
 Replace the contents of `model/` with any checkpoint trained by this

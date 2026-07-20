@@ -191,9 +191,18 @@ def inspect(file: UploadFile):
         path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=400, detail=f'Could not parse catalog: {e}')
+
+    # Best-effort prefill suggestion; never fail the upload over it.
+    try:
+        suggestion = user_catalog.suggest_system(
+            df, inspection['mapping'], kinematic_io.load_meta_table())
+    except Exception:
+        suggestion = dict(suggested_key=None, reason=None,
+                          sep_arcmin=None, candidates=[])
+
     _remember(_UPLOADS, upload_id, path)
     return dict(upload_id=upload_id, filename=file.filename,
-                **inspection)
+                suggestion=suggestion, **inspection)
 
 
 @app.post('/api/run')

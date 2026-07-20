@@ -449,7 +449,11 @@ function datasetPanelHTML(ds) {
       </div>
       <p class="hint">Prefill copies local_volume_database values into
         the fields; the run always uses what the fields say. Blank
-        fields fall back to data-driven defaults.</p>
+        fields fall back to data-driven defaults. The system is
+        auto-detected from your file on upload — override by editing the
+        key and clicking Prefill.</p>
+      <div id="${ds}_detectInfo" class="hint"
+           style="margin-top:-4px"></div>
       <div class="grid3">
         <label class="field"><span>R_half [kpc]
             <span class="req">*</span></span>
@@ -633,11 +637,35 @@ function updateRunButton() {
 }
 
 // --- upload + inspect ----------------------------------------------------
+// Act on the server's prefill suggestion: fill the system key and
+// prefill the metadata for a confident match, or flag a multi-system
+// file. Always overridable - it only fills fields the user can edit.
+async function applySuggestion(ds, sug) {
+  const info = q(ds, 'detectInfo');
+  info.innerHTML = '';
+  if (!sug) return;
+  if (sug.suggested_key) {
+    q(ds, 'lvdbKey').value = sug.suggested_key;
+    await onPrefill(ds);
+    const how = sug.reason === 'position'
+      ? `matched by sky position (${sug.sep_arcmin}′ from the field `
+        + 'center)'
+      : 'matched by a system-name column';
+    info.innerHTML = `Auto-detected <b>${escapeHtml(sug.suggested_key)}`
+      + `</b> — ${how}, and prefilled the System fields below.`;
+  } else if (sug.reason === 'multi') {
+    info.innerHTML = 'This file contains several known systems ('
+      + sug.candidates.map(escapeHtml).join(', ') + '). Use the Row '
+      + 'filter above to pick one, then set the key and click Prefill.';
+  }
+}
+
 async function onFileChange(ds) {
   const file = q(ds, 'fileInput').files[0];
   ST[ds].uploadId = null;
   ST[ds].fileColumns = [];
   q(ds, 'inspectInfo').innerHTML = '';
+  q(ds, 'detectInfo').innerHTML = '';
   q(ds, 'mappingBox').style.display = 'none';
   q(ds, 'mappingGrid').innerHTML = '';
   q(ds, 'flagsBox').innerHTML = '';
@@ -669,6 +697,7 @@ async function onFileChange(ds) {
             </select></label>`;
         }).join('') + '</div>';
     }
+    await applySuggestion(ds, r.suggestion);
     setStatus(`Dataset ${ds} ready — check the column assignment.`, 'ok');
   } catch (e) {
     setStatus(`Dataset ${ds} inspection failed.`, 'err');

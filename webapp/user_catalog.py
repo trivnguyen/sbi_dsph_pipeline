@@ -34,6 +34,7 @@ import astropy.table as at
 import astropy.units as auni
 import numpy as np
 import pandas as pd
+from astropy.coordinates import SkyCoord
 
 # In the packaged bundle, `tsnpe`/`dsph_analysis` sit next to this
 # file; in the repo, the tsnpe package lives in ../tsnpe.
@@ -76,6 +77,10 @@ _MAX_QUERY_PASSES = 6
 
 _TRUE_STRINGS = {'true', 't', 'yes', 'y', '1'}
 _FALSE_STRINGS = {'false', 'f', 'no', 'n', '0'}
+
+# A catalog center within this angular distance of a known system's
+# center is taken as a positional match for the prefill suggestion.
+_SUGGEST_MAX_SEP_DEG = 0.5
 
 
 def _normalize(name: str) -> str:
@@ -168,6 +173,121 @@ def inspect_catalog(df: pd.DataFrame) -> dict:
         has_distance=('distance' in mapping or 'dm' in mapping),
         flag_columns=flag_columns,
     )
+
+
+def _known_key_lookup(meta_df: pd.DataFrame) -> dict:
+    """Normalized system key/name -> canonical database key."""
+    lookup = {}
+    for _, row in meta_df.iterrows():
+        canonical = str(row['key'])
+        for field in ('key', 'name'):
+            value = row.get(field)
+            if isinstance(value, str) and value.strip():
+                lookup.setdefault(_normalize(value), canonical)
+    return lookup
+
+
+def _keys_from_columns(df: pd.DataFrame, lookup: dict) -> dict:
+    """Known database keys appearing in any string column of `df`.
+
+    A column counts as a system-identifier column only if at least half
+    its non-null values are recognized keys, so a stray coincidental
+    match in a free-text column doesn't register.
+
+    Returns:
+        {canonical key: number of rows carrying it}.
+    """
+    found = {}
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        values = df[col].dropna().astype(str)
+        if len(values) == 0:
+            continue
+        matched = values.map(_normalize).map(lookup).dropna()
+        if len(matched) < 0.5 * len(values):
+            continue
+        for key, count in matched.value_counts().items():
+            found[key] = found.get(key, 0) + int(count)
+    return found
+
+
+def _nearest_system(
+    ra_deg: float, dec_deg: float, meta_df: pd.DataFrame,
+) -> tuple:
+    """Closest known system to a sky position.
+
+    Returns:
+        (canonical key, separation in degrees), or (None, None) if the
+        table has no usable coordinates.
+    """
+    sub = meta_df.dropna(subset=['ra', 'dec'])
+    if len(sub) == 0:
+        return None, None
+    catalog = SkyCoord(sub['ra'].to_numpy() * auni.deg,
+                       sub['dec'].to_numpy() * auni.deg)
+    here = SkyCoord(ra_deg * auni.deg, dec_deg * auni.deg)
+    sep = here.separation(catalog).deg
+    i = int(np.argmin(sep))
+    return str(sub.iloc[i]['key']), float(sep[i])
+
+
+def suggest_system(
+    df: pd.DataFrame, mapping: dict, meta_df: pd.DataFrame,
+    max_sep_deg: float = _SUGGEST_MAX_SEP_DEG,
+) -> dict:
+    """Guess which known system an uploaded catalog is, to prefill the
+    metadata form (always overridable by the user).
+
+    Two signals, tried in order:
+      1. A column that names the system - e.g. a `key`/`name` column
+         holding a database key like `draco_1`. This is also what flags
+         a multi-system file: if several distinct known keys appear, no
+         single system is suggested and they are returned as candidates.
+      2. Sky position - the catalog's median center matched to the
+         nearest known system within `max_sep_deg`.
+
+    Args:
+        df: Catalog as returned by `read_catalog`.
+        mapping: Role -> column mapping (needs `ra`/`dec` for the
+            positional match); from `inspect_catalog`/`resolve_mapping`.
+        meta_df: The known-systems table (`key`, `ra`, `dec`, `name`),
+            e.g. from `kinematic_io.load_meta_table`.
+        max_sep_deg: Positional-match tolerance.
+
+    Returns:
+        JSON-friendly dict: `suggested_key` (canonical key or None),
+        `reason` ('key' | 'position' | 'multi' | None), `sep_arcmin`
+        (for a positional match, else None), and `candidates` (the
+        distinct known keys found in a name column, when more than one).
+    """
+    none = dict(suggested_key=None, reason=None, sep_arcmin=None,
+                candidates=[])
+    lookup = _known_key_lookup(meta_df)
+
+    found = _keys_from_columns(df, lookup)
+    if len(found) == 1:
+        key = next(iter(found))
+        return dict(suggested_key=key, reason='key', sep_arcmin=None,
+                    candidates=[key])
+    if len(found) > 1:
+        candidates = sorted(found, key=lambda k: -found[k])
+        return dict(suggested_key=None, reason='multi', sep_arcmin=None,
+                    candidates=candidates)
+
+    if 'ra' not in mapping or 'dec' not in mapping:
+        return none
+    ra = pd.to_numeric(df[mapping['ra']], errors='coerce').to_numpy()
+    dec = pd.to_numeric(df[mapping['dec']], errors='coerce').to_numpy()
+    finite = np.isfinite(ra) & np.isfinite(dec)
+    if not finite.any():
+        return none
+    c_ra, c_dec = _median_center(ra[finite], dec[finite])
+    key, sep = _nearest_system(c_ra, c_dec, meta_df)
+    if key is not None and sep <= max_sep_deg:
+        return dict(suggested_key=key, reason='position',
+                    sep_arcmin=round(sep * 60.0, 1), candidates=[key])
+    return none
 
 
 def _median_center(ra_deg: np.ndarray, dec_deg: np.ndarray) -> tuple:
