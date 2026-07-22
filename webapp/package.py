@@ -194,12 +194,13 @@ present) and histograms of each available quantity that track the kept
 cut before running.
 
 Select on the scatter panels with a **box**, **lasso**, or **circle**
-(the circle shape selects the ellipse inscribed in the box you drag).
-Draw with **exclude selected** to drop outliers, or **Exclude all** then
-**include selected** to keep only a region; grey points are excluded,
-and selections combine across all panels. Click **Load / refresh plots**
-to (re)build them; changing any cut above clears the selection. The kept
-stars are passed to the run as an explicit list.
+(pick the shape from the dropdown, then drag). Draw with **exclude
+selected** to drop outliers, or **Exclude all** then **include
+selected** to keep only a region; grey points are excluded, and
+selections combine across all panels. Each panel has an **Enlarge**
+button that grows it for easier, more precise selection. Click **Load /
+refresh plots** to (re)build the panels; changing any cut above clears
+the selection. The kept stars are passed to the run as an explicit list.
 
 ## System metadata
 

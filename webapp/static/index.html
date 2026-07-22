@@ -118,11 +118,21 @@
                margin: 3px 0; }
   .checkline input[type=checkbox] { width: auto; min-height: 0; }
   .req { color: var(--error); }
-  .preview-row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .preview-row { display: flex; flex-wrap: wrap; gap: 12px;
+                 align-items: flex-start; }
   .preview-panel {
     background: #fff; border: 1px solid var(--border);
     border-radius: 8px;
   }
+  .preview-head { display: flex; justify-content: flex-end;
+                  padding: 3px 4px 0; }
+  .preview-enlarge {
+    padding: 1px 8px; font-size: 11px; font-weight: 500;
+    background: #fff; color: var(--accent);
+    border: 1px solid var(--border); border-radius: 5px;
+    cursor: pointer; min-height: 0;
+  }
+  .preview-enlarge:hover { background: #f2f4f7; color: var(--accent); }
   .spinner {
     display: inline-block; width: 13px; height: 13px;
     border: 2px solid var(--accent); border-top-color: transparent;
@@ -456,7 +466,8 @@ function datasetPanelHTML(ds) {
         with a box / lasso / circle; the histograms below track the kept
         (colored) vs excluded (grey) distribution of each quantity so you
         can see the effect of your cut. Panels shown depend on the columns
-        your file has. The kept stars feed the run.</p>
+        your file has. Use a panel's <b>Enlarge</b> button if it is too
+        small to select precisely. The kept stars feed the run.</p>
       <div class="btnrow" style="margin:0 0 4px">
         <button class="secondary small" id="${ds}_loadPreviewBtn"
                 type="button">Load / refresh plots</button>
@@ -1272,6 +1283,30 @@ async function loadPreview(ds) {
   }
 }
 
+// Wrap a plot in a panel with an Enlarge/Shrink toggle, returning the
+// inner div that Plotly draws into (and that carries the panel's data).
+function makePreviewPanel(ds, host) {
+  const wrap = document.createElement('div');
+  wrap.className = 'preview-panel';
+  const head = document.createElement('div');
+  head.className = 'preview-head';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'preview-enlarge';
+  btn.textContent = 'Enlarge';
+  const plot = document.createElement('div');
+  head.appendChild(btn);
+  wrap.appendChild(head);
+  wrap.appendChild(plot);
+  host.appendChild(wrap);
+  btn.addEventListener('click', () => {
+    plot._big = !plot._big;
+    btn.textContent = plot._big ? 'Shrink' : 'Enlarge';
+    drawPreviewPanel(ds, plot, true);
+  });
+  return plot;
+}
+
 function renderPreviewPanels(ds) {
   const pv = ST[ds].preview;
   const host = q(ds, 'previewPanels');
@@ -1286,12 +1321,10 @@ function renderPreviewPanels(ds) {
       if (xv == null || yv == null) continue;
       xs.push(xv); ys.push(yv); pid.push(pv.ids[i]);
     }
-    const div = document.createElement('div');
-    div.className = 'preview-panel';
+    const div = makePreviewPanel(ds, host);
     div._kind = 'scatter';
     div._pid = pid; div._xs = xs; div._ys = ys;
     div._xr = xr; div._yr = yr;
-    host.appendChild(div);
     drawPreviewPanel(ds, div);
     pv.divs.push(div);
   }
@@ -1304,22 +1337,29 @@ function renderPreviewPanels(ds) {
       vals.push(pv.cols[role][i]); pid.push(pv.ids[i]);
     }
     if (!vals.length) continue;
-    const div = document.createElement('div');
-    div.className = 'preview-panel';
+    const div = makePreviewPanel(ds, host);
     div._kind = 'hist';
     div._role = role; div._vals = vals; div._pid = pid;
-    host.appendChild(div);
     drawPreviewPanel(ds, div);
     pv.divs.push(div);
   }
 }
 
-// Scatter selection shape -> Plotly dragmode. "circle" reuses the box
-// drag (reliable) and keeps the inscribed ellipse in onPreviewSelect;
-// only "lasso" needs a different dragmode.
+// Scatter selection shape -> Plotly dragmode. "circle" uses Plotly's
+// drawcircle (a real, visible ellipse); the stars inside it are picked
+// in onPreviewShape. Box/lasso go through plotly_selected.
 function currentDragmode(ds) {
-  const sel = q(ds, 'sel_shape');
-  return (sel && sel.value === 'lasso') ? 'lasso' : 'select';
+  const v = (q(ds, 'sel_shape') || {}).value;
+  if (v === 'lasso') return 'lasso';
+  if (v === 'circle') return 'drawcircle';
+  return 'select';
+}
+
+// Panel pixel size; enlarged panels make precise selection easier.
+function previewSize(div) {
+  const big = !!div._big;
+  if (div._kind === 'hist') return big ? [600, 340] : [292, 200];
+  return big ? [600, 500] : [292, 260];
 }
 
 // Draw (or redraw) one panel. Redrawing with newPlot after every
@@ -1342,6 +1382,7 @@ function drawPreviewPanel(ds, div, keepRange) {
   } else if (xr === 'ra') {
     xaxis.autorange = 'reversed';
   }
+  const [W, H] = previewSize(div);
   Plotly.newPlot(div, [{
     type: 'scatter', mode: 'markers', x: div._xs, y: div._ys,
     customdata: div._pid,
@@ -1349,12 +1390,15 @@ function drawPreviewPanel(ds, div, keepRange) {
     hovertemplate: `${xlab}=%{x:.4g}<br>${ylab}=%{y:.4g}`
       + '<extra></extra>',
   }], {
-    width: 292, height: 260, margin: { l: 50, r: 10, t: 10, b: 42 },
+    width: W, height: H, margin: { l: 50, r: 10, t: 10, b: 42 },
     dragmode: currentDragmode(ds), paper_bgcolor: '#fff',
     plot_bgcolor: '#fff', font: { size: 11 }, xaxis, yaxis,
+    newshape: { line: { color: DS_COLOR[ds], width: 2 },
+                fillcolor: DS_COLOR[ds], opacity: 0.12 },
   }, { displaylogo: false, responsive: false,
-       modeBarButtonsToAdd: ['select2d', 'lasso2d'] });
-  div.on('plotly_selected', (ev) => onPreviewSelect(ds, div, ev));
+       modeBarButtonsToAdd: ['select2d', 'lasso2d', 'drawcircle'] });
+  div.on('plotly_selected', (ev) => onPreviewSelect(ds, ev));
+  div.on('plotly_relayout', () => onPreviewShape(ds, div));
 }
 
 // Histogram panel (visualization only): the kept (colored) distribution
@@ -1382,40 +1426,52 @@ function drawHistPanel(ds, div, keepRange) {
     xaxis.range = div._fullLayout.xaxis.range.slice();
     xaxis.autorange = false;
   }
+  const [W, H] = previewSize(div);
   Plotly.newPlot(div, [
     trace(exclV, PREVIEW_EXCLUDED_COLOR),
     trace(keptV, DS_COLOR[ds]),
   ], {
-    width: 292, height: 200, margin: { l: 44, r: 10, t: 10, b: 42 },
+    width: W, height: H, margin: { l: 44, r: 10, t: 10, b: 42 },
     barmode: 'overlay', dragmode: 'zoom', showlegend: false,
     paper_bgcolor: '#fff', plot_bgcolor: '#fff', font: { size: 11 },
     xaxis, yaxis: { title: { text: 'count' } },
   }, { displaylogo: false, responsive: false });
 }
 
-function onPreviewSelect(ds, div, ev) {
+// Box / lasso selection (scatter panels).
+function onPreviewSelect(ds, ev) {
   const pv = ST[ds].preview;
-  if (!pv || !ev) return;
+  if (!pv || !ev || !ev.points || !ev.points.length) return;
   const exclude = q(ds, 'sel_mode').value === 'exclude';
-  const apply = (id) => exclude ? pv.excluded.add(id)
-    : pv.excluded.delete(id);
-  // "circle": a box drag whose inscribed ellipse is the selection.
-  if (q(ds, 'sel_shape').value === 'circle' && ev.range
-      && div._kind === 'scatter') {
-    const rx = ev.range.x, ry = ev.range.y;
-    const cx = (rx[0] + rx[1]) / 2, cy = (ry[0] + ry[1]) / 2;
-    const ax = Math.abs(rx[1] - rx[0]) / 2, ay = Math.abs(ry[1] - ry[0]) / 2;
-    if (ax > 0 && ay > 0) {
-      for (let i = 0; i < div._pid.length; i++) {
-        const nx = (div._xs[i] - cx) / ax, ny = (div._ys[i] - cy) / ay;
-        if (nx * nx + ny * ny <= 1) apply(div._pid[i]);
-      }
-    }
-  } else {
-    if (!ev.points || !ev.points.length) return;
-    for (const p of ev.points) apply(p.customdata);
+  for (const p of ev.points) {
+    if (exclude) pv.excluded.add(p.customdata);
+    else pv.excluded.delete(p.customdata);
   }
   recolorPreview(ds);
+  updatePreviewCount(ds);
+}
+
+// Circle (drawcircle) selection: pick the stars inside the drawn
+// ellipse. Fires via plotly_relayout; a relayout with no new circle
+// shape (zoom, pan, autorange, our own rebuild) is ignored.
+function onPreviewShape(ds, div) {
+  const pv = ST[ds].preview;
+  if (!pv || div._kind !== 'scatter') return;
+  const shapes = (div.layout && div.layout.shapes) || [];
+  const s = shapes[shapes.length - 1];
+  if (!s || s.type !== 'circle') return;
+  const cx = (s.x0 + s.x1) / 2, cy = (s.y0 + s.y1) / 2;
+  const ax = Math.abs(s.x1 - s.x0) / 2, ay = Math.abs(s.y1 - s.y0) / 2;
+  if (!(ax > 0) || !(ay > 0)) return;
+  const exclude = q(ds, 'sel_mode').value === 'exclude';
+  for (let i = 0; i < div._pid.length; i++) {
+    const nx = (div._xs[i] - cx) / ax, ny = (div._ys[i] - cy) / ay;
+    if (nx * nx + ny * ny <= 1) {
+      if (exclude) pv.excluded.add(div._pid[i]);
+      else pv.excluded.delete(div._pid[i]);
+    }
+  }
+  recolorPreview(ds);   // rebuild also drops the drawn circle
   updatePreviewCount(ds);
 }
 
