@@ -316,6 +316,8 @@ const PREVIEW_LABELS = {
   pmdec: 'pmdec [mas/yr]', vr: 'v_los [km/s]', feh: '[Fe/H]',
 };
 const PREVIEW_EXCLUDED_COLOR = '#c9ced6';
+// Scalar quantities to show as kept-vs-excluded histograms (when present).
+const PREVIEW_HIST = ['vr', 'feh', 'pmra', 'pmdec'];
 
 // Profile panels: key, y-axis title, y scale. x (radius) is shared/log.
 const PANELS = [
@@ -449,11 +451,12 @@ function datasetPanelHTML(ds) {
 
     <fieldset id="${ds}_advBox">
       <legend>1b · Manual star selection (optional)</legend>
-      <p class="hint" style="margin-top:0">Plot the stars that pass the
-        cuts above and choose which to keep by drawing on the figures
-        (box or lasso select). Panels shown depend on the columns your
-        file has (RA–Dec always; pmra–pmdec and v_los–[Fe/H] if
-        present). The kept stars feed the run.</p>
+      <p class="hint" style="margin-top:0">Visualize your data and choose
+        which stars to keep before running. Select on the scatter panels
+        with a box / lasso / circle; the histograms below track the kept
+        (colored) vs excluded (grey) distribution of each quantity so you
+        can see the effect of your cut. Panels shown depend on the columns
+        your file has. The kept stars feed the run.</p>
       <div class="btnrow" style="margin:0 0 4px">
         <button class="secondary small" id="${ds}_loadPreviewBtn"
                 type="button">Load / refresh plots</button>
@@ -462,6 +465,13 @@ function datasetPanelHTML(ds) {
       </div>
       <div id="${ds}_previewControls" style="display:none">
         <div class="toolbar" style="margin:8px 0">
+          <label>Shape:
+            <select id="${ds}_sel_shape"
+                    style="width:auto; min-height:32px">
+              <option value="select" selected>box</option>
+              <option value="lasso">lasso</option>
+              <option value="circle">circle</option>
+            </select></label>
           <label>On draw:
             <select id="${ds}_sel_mode"
                     style="width:auto; min-height:32px">
@@ -477,7 +487,8 @@ function datasetPanelHTML(ds) {
         <p class="hint" style="margin-bottom:0">Grey = excluded from the
           run. Drop a few outliers with <b>exclude selected</b>, or click
           <b>Exclude all</b> then <b>include selected</b> to keep only a
-          region. Changing the cuts above clears this — reload.</p>
+          region (the <b>circle</b> shape is handy for a round clump).
+          Changing the cuts above clears this — reload.</p>
       </div>
     </fieldset>
 
@@ -567,7 +578,8 @@ function datasetPanelHTML(ds) {
         <label class="field"><span>Profile samples</span>
           <input type="number" id="${ds}_n_profile_samples"
                  value="500"></label>
-        <label class="field"><span>Radial bins (disp/kurtosis)</span>
+        <label class="field"><span>Radial bins (σ/κ points, plot only)
+          </span>
           <input type="number" id="${ds}_n_bins" value="4"></label>
         <label class="field"><span>Inner slope γ min</span>
           <input type="number" id="${ds}_gamma_min" step="any"
@@ -576,6 +588,10 @@ function datasetPanelHTML(ds) {
           <input type="number" id="${ds}_gamma_max" step="any"
                  value="2"></label>
       </div>
+      <p class="hint" style="margin:6px 0 0">The <b>radial bins</b> only
+        set the binned σ_LOS / κ_LOS <i>data points</i> drawn on the
+        profile plots (each bin is a short MCMC fit). The inference is
+        unbinned — this does not affect the posterior.</p>
       <p class="hint" style="margin-bottom:0">The model's γ prior spans
         −1 to 2. Narrowing this (e.g. 0 to 2) keeps only the posterior
         draws with γ in range — a rejection cut on the fixed number of
@@ -1262,6 +1278,7 @@ function renderPreviewPanels(ds) {
   purgePreviewDivs(ds);
   host.innerHTML = '';
   pv.divs = [];
+  // 2D scatter panels for the available role pairs.
   for (const [xr, yr] of pv.pairs) {
     const xs = [], ys = [], pid = [];
     for (let i = 0; i < pv.ids.length; i++) {
@@ -1271,21 +1288,47 @@ function renderPreviewPanels(ds) {
     }
     const div = document.createElement('div');
     div.className = 'preview-panel';
-    div._pid = pid;
-    div._xs = xs; div._ys = ys;
+    div._kind = 'scatter';
+    div._pid = pid; div._xs = xs; div._ys = ys;
     div._xr = xr; div._yr = yr;
+    host.appendChild(div);
+    drawPreviewPanel(ds, div);
+    pv.divs.push(div);
+  }
+  // 1D histograms of the available scalar quantities.
+  for (const role of PREVIEW_HIST) {
+    if (!(role in pv.cols)) continue;
+    const vals = [], pid = [];
+    for (let i = 0; i < pv.ids.length; i++) {
+      if (pv.cols[role][i] == null) continue;
+      vals.push(pv.cols[role][i]); pid.push(pv.ids[i]);
+    }
+    if (!vals.length) continue;
+    const div = document.createElement('div');
+    div.className = 'preview-panel';
+    div._kind = 'hist';
+    div._role = role; div._vals = vals; div._pid = pid;
     host.appendChild(div);
     drawPreviewPanel(ds, div);
     pv.divs.push(div);
   }
 }
 
+// Scatter selection shape -> Plotly dragmode. "circle" reuses the box
+// drag (reliable) and keeps the inscribed ellipse in onPreviewSelect;
+// only "lasso" needs a different dragmode.
+function currentDragmode(ds) {
+  const sel = q(ds, 'sel_shape');
+  return (sel && sel.value === 'lasso') ? 'lasso' : 'select';
+}
+
 // Draw (or redraw) one panel. Redrawing with newPlot after every
-// selection is deliberate: a box/lasso leaves a select-outline that
-// otherwise blocks the *next* brush on the same panel, and only a full
-// rebuild clears it (restyle/react keep it). Prior axis ranges are
-// carried over so a redraw doesn't throw away the user's zoom.
+// selection is deliberate: a box/lasso leaves a select-outline (and a
+// drawn circle leaves a shape) that otherwise blocks the *next* brush on
+// that panel, and only a full rebuild clears it (restyle/react keep it).
+// Prior axis ranges are carried over so a redraw keeps the user's zoom.
 function drawPreviewPanel(ds, div, keepRange) {
+  if (div._kind === 'hist') return drawHistPanel(ds, div, keepRange);
   const xr = div._xr, yr = div._yr, pv = ST[ds].preview;
   const xlab = PREVIEW_LABELS[xr], ylab = PREVIEW_LABELS[yr];
   const colors = div._pid.map((id) => pv.excluded.has(id)
@@ -1306,28 +1349,78 @@ function drawPreviewPanel(ds, div, keepRange) {
     hovertemplate: `${xlab}=%{x:.4g}<br>${ylab}=%{y:.4g}`
       + '<extra></extra>',
   }], {
-    width: 340, height: 300, margin: { l: 54, r: 12, t: 12, b: 44 },
-    dragmode: 'select', paper_bgcolor: '#fff', plot_bgcolor: '#fff',
-    font: { size: 11 }, xaxis, yaxis,
+    width: 292, height: 260, margin: { l: 50, r: 10, t: 10, b: 42 },
+    dragmode: currentDragmode(ds), paper_bgcolor: '#fff',
+    plot_bgcolor: '#fff', font: { size: 11 }, xaxis, yaxis,
   }, { displaylogo: false, responsive: false,
        modeBarButtonsToAdd: ['select2d', 'lasso2d'] });
-  div.on('plotly_selected', (ev) => onPreviewSelect(ds, ev));
+  div.on('plotly_selected', (ev) => onPreviewSelect(ds, div, ev));
 }
 
-function onPreviewSelect(ds, ev) {
+// Histogram panel (visualization only): the kept (colored) distribution
+// over the excluded (grey) one, sharing bins, so the effect of the
+// current selection on each quantity is visible. Plotly histograms don't
+// emit selection events, so cutting is done on the scatter panels - every
+// histogram quantity also appears in one - and the histograms just track
+// it live via recolorPreview's rebuild.
+function drawHistPanel(ds, div, keepRange) {
+  const pv = ST[ds].preview, role = div._role;
+  const lab = PREVIEW_LABELS[role];
+  const keptV = [], exclV = [];
+  for (let i = 0; i < div._vals.length; i++) {
+    (pv.excluded.has(div._pid[i]) ? exclV : keptV).push(div._vals[i]);
+  }
+  let lo = Infinity, hi = -Infinity;
+  for (const v of div._vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const size = hi > lo ? (hi - lo) / 28 : 1;
+  const xbins = { start: lo, end: hi + size, size };
+  const trace = (vals, color) => ({
+    type: 'histogram', x: vals, xbins, marker: { color }, opacity: 0.8,
+  });
+  const xaxis = { title: { text: lab } };
+  if (keepRange && div._fullLayout) {
+    xaxis.range = div._fullLayout.xaxis.range.slice();
+    xaxis.autorange = false;
+  }
+  Plotly.newPlot(div, [
+    trace(exclV, PREVIEW_EXCLUDED_COLOR),
+    trace(keptV, DS_COLOR[ds]),
+  ], {
+    width: 292, height: 200, margin: { l: 44, r: 10, t: 10, b: 42 },
+    barmode: 'overlay', dragmode: 'zoom', showlegend: false,
+    paper_bgcolor: '#fff', plot_bgcolor: '#fff', font: { size: 11 },
+    xaxis, yaxis: { title: { text: 'count' } },
+  }, { displaylogo: false, responsive: false });
+}
+
+function onPreviewSelect(ds, div, ev) {
   const pv = ST[ds].preview;
-  if (!pv || !ev || !ev.points || !ev.points.length) return;
+  if (!pv || !ev) return;
   const exclude = q(ds, 'sel_mode').value === 'exclude';
-  for (const p of ev.points) {
-    if (exclude) pv.excluded.add(p.customdata);
-    else pv.excluded.delete(p.customdata);
+  const apply = (id) => exclude ? pv.excluded.add(id)
+    : pv.excluded.delete(id);
+  // "circle": a box drag whose inscribed ellipse is the selection.
+  if (q(ds, 'sel_shape').value === 'circle' && ev.range
+      && div._kind === 'scatter') {
+    const rx = ev.range.x, ry = ev.range.y;
+    const cx = (rx[0] + rx[1]) / 2, cy = (ry[0] + ry[1]) / 2;
+    const ax = Math.abs(rx[1] - rx[0]) / 2, ay = Math.abs(ry[1] - ry[0]) / 2;
+    if (ax > 0 && ay > 0) {
+      for (let i = 0; i < div._pid.length; i++) {
+        const nx = (div._xs[i] - cx) / ax, ny = (div._ys[i] - cy) / ay;
+        if (nx * nx + ny * ny <= 1) apply(div._pid[i]);
+      }
+    }
+  } else {
+    if (!ev.points || !ev.points.length) return;
+    for (const p of ev.points) apply(p.customdata);
   }
   recolorPreview(ds);
   updatePreviewCount(ds);
 }
 
 // Recolor every panel to reflect the excluded set. Rebuilds (rather than
-// restyles) so the just-drawn selection outline is cleared and the next
+// restyles) so the just-drawn selection/shape is cleared and the next
 // brush works; keeps each panel's current zoom.
 function recolorPreview(ds) {
   for (const div of ST[ds].preview.divs) drawPreviewPanel(ds, div, true);
@@ -1533,6 +1626,14 @@ function wireDataset(ds) {
     if (!ST[ds].preview) return;
     ST[ds].preview.excluded = new Set(ST[ds].preview.ids);
     recolorPreview(ds); updatePreviewCount(ds);
+  });
+  q(ds, 'sel_shape').addEventListener('change', () => {
+    const pv = ST[ds].preview;
+    if (!pv) return;
+    const dm = currentDragmode(ds);
+    for (const div of pv.divs) {
+      if (div._kind === 'scatter') Plotly.relayout(div, { dragmode: dm });
+    }
   });
   // A loaded selection is only valid for the cuts it was drawn under.
   for (const ev of ['change', 'input']) {

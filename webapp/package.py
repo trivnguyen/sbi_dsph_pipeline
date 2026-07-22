@@ -186,14 +186,20 @@ they replace same-named columns in your file.
 
 ### Manual selection (optional)
 
-Section **1b** plots the stars that pass the cuts above - RA-Dec always,
-plus pmra-pmdec and v_los-[Fe/H] when those columns are present - and
-lets you pick which to keep by drawing on the figures (box or lasso
-select). Draw with **exclude selected** to drop outliers, or **Exclude
-all** then **include selected** to keep only a region; grey points are
-excluded, and selections combine across all panels. Click **Load /
-refresh plots** to (re)build them; changing any cut above clears the
-selection. The kept stars are passed to the run as an explicit list.
+Section **1b** plots the stars that pass the cuts above and lets you
+pick which to keep by drawing on the figures. It shows scatter panels
+(RA-Dec always, plus pmra-pmdec and v_los-[Fe/H] when those columns are
+present) and histograms of each available quantity that track the kept
+(colored) vs excluded (grey) split live, so you can see the effect of a
+cut before running.
+
+Select on the scatter panels with a **box**, **lasso**, or **circle**
+(the circle shape selects the ellipse inscribed in the box you drag).
+Draw with **exclude selected** to drop outliers, or **Exclude all** then
+**include selected** to keep only a region; grey points are excluded,
+and selections combine across all panels. Click **Load / refresh plots**
+to (re)build them; changing any cut above clears the selection. The kept
+stars are passed to the run as an explicit list.
 
 ## System metadata
 
