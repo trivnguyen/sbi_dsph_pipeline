@@ -118,6 +118,11 @@
                margin: 3px 0; }
   .checkline input[type=checkbox] { width: auto; min-height: 0; }
   .req { color: var(--error); }
+  .preview-row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .preview-panel {
+    background: #fff; border: 1px solid var(--border);
+    border-radius: 8px;
+  }
   .spinner {
     display: inline-block; width: 13px; height: 13px;
     border: 2px solid var(--accent); border-top-color: transparent;
@@ -288,7 +293,8 @@ const INK = '#1f2430';
 
 const ST = { A: freshState(), B: freshState() };
 function freshState() {
-  return { uploadId: null, fileColumns: [], result: null };
+  return { uploadId: null, fileColumns: [], result: null,
+           preview: null };
 }
 
 const ROLES = [
@@ -299,7 +305,17 @@ const ROLES = [
   ['distance', 'distance [kpc]', false],
   ['dm', 'dist. modulus [mag]', false],
   ['mem_prob', 'membership prob', false],
+  ['pmra', 'pmra [mas/yr]', false],
+  ['pmdec', 'pmdec [mas/yr]', false],
+  ['feh', '[Fe/H]', false],
 ];
+
+// Axis labels for the manual-selection preview panels.
+const PREVIEW_LABELS = {
+  ra: 'RA [deg]', dec: 'Dec [deg]', pmra: 'pmra [mas/yr]',
+  pmdec: 'pmdec [mas/yr]', vr: 'v_los [km/s]', feh: '[Fe/H]',
+};
+const PREVIEW_EXCLUDED_COLOR = '#c9ced6';
 
 // Profile panels: key, y-axis title, y scale. x (radius) is shared/log.
 const PANELS = [
@@ -384,7 +400,7 @@ function datasetPanelHTML(ds) {
     <h2><span class="swatch" style="background:${DS_COLOR[ds]}"></span>
       Dataset ${ds}</h2>
 
-    <fieldset>
+    <fieldset id="${ds}_catalogBox">
       <legend>1 · Catalog</legend>
       ${sameRow}
       <div id="${ds}_catalogInner">
@@ -428,6 +444,40 @@ function datasetPanelHTML(ds) {
           file column. For a plain radius cut, prefer the R_proj boxes
           in <b>System</b>. All filters here combine with the cuts
           above.</p>
+      </div>
+    </fieldset>
+
+    <fieldset id="${ds}_advBox">
+      <legend>1b · Manual star selection (optional)</legend>
+      <p class="hint" style="margin-top:0">Plot the stars that pass the
+        cuts above and choose which to keep by drawing on the figures
+        (box or lasso select). Panels shown depend on the columns your
+        file has (RA–Dec always; pmra–pmdec and v_los–[Fe/H] if
+        present). The kept stars feed the run.</p>
+      <div class="btnrow" style="margin:0 0 4px">
+        <button class="secondary small" id="${ds}_loadPreviewBtn"
+                type="button">Load / refresh plots</button>
+        <span class="hint" id="${ds}_previewCount"
+              style="margin:0"></span>
+      </div>
+      <div id="${ds}_previewControls" style="display:none">
+        <div class="toolbar" style="margin:8px 0">
+          <label>On draw:
+            <select id="${ds}_sel_mode"
+                    style="width:auto; min-height:32px">
+              <option value="exclude" selected>exclude selected</option>
+              <option value="include">include selected</option>
+            </select></label>
+          <button class="secondary small" id="${ds}_inclAllBtn"
+                  type="button">Include all</button>
+          <button class="secondary small" id="${ds}_exclAllBtn"
+                  type="button">Exclude all</button>
+        </div>
+        <div id="${ds}_previewPanels" class="preview-row"></div>
+        <p class="hint" style="margin-bottom:0">Grey = excluded from the
+          run. Drop a few outliers with <b>exclude selected</b>, or click
+          <b>Exclude all</b> then <b>include selected</b> to keep only a
+          region. Changing the cuts above clears this — reload.</p>
       </div>
     </fieldset>
 
@@ -630,6 +680,8 @@ function updateRunButton() {
     const box = q(ds, 'memProbBox');
     if (box) box.style.display =
       currentMapping(ds).mem_prob ? 'block' : 'none';
+    const load = q(ds, 'loadPreviewBtn');
+    if (load) load.disabled = !readingReady(ds);
   }
   const compare = $('compareToggle').checked;
   $('runBtn').disabled =
@@ -750,6 +802,8 @@ function collectPayload(ds) {
     mem_prob_min: cols.mem_prob ? q(src, 'mem_prob_min').value : '',
   };
   for (const id of ids) p[id] = q(ds, id).value;
+  const manual = previewKeptIds(ds);
+  if (manual) p.manual_ids = manual;
   return p;
 }
 
@@ -776,6 +830,9 @@ function summaryTable(ds, s) {
     : `${kept}`;
   const filters = [];
   if (i.query) filters.push(`<code>${escapeHtml(i.query)}</code>`);
+  if (i.manual_selection != null) {
+    filters.push(`manual selection (${i.manual_selection} stars kept)`);
+  }
   if (i.radius_unit) {
     filters.push(`R ∈ [${i.radius_min != null ? fmt(i.radius_min) : '−∞'},`
       + ` ${i.radius_max != null ? fmt(i.radius_max) : '∞'}]`
@@ -1155,6 +1212,156 @@ function autoscaleAll() {
   Plotly.relayout(gd, upd).then((g) => syncAxisInputs(g));
 }
 
+// --- manual star selection (advanced) ------------------------------------
+function collectPreviewPayload(ds) {
+  const src = catalogSource(ds);
+  const cols = currentMapping(src);
+  return {
+    upload_id: ST[src].uploadId,
+    columns: cols,
+    flags: currentFlags(src),
+    mem_prob_min: cols.mem_prob ? q(src, 'mem_prob_min').value : '',
+    query: q(ds, 'query').value.trim(),
+  };
+}
+
+async function loadPreview(ds) {
+  if (!readingReady(ds)) {
+    showError('Assign RA/Dec/vr/vr_err (and upload a file) first.');
+    return;
+  }
+  const btn = q(ds, 'loadPreviewBtn');
+  btn.disabled = true;
+  q(ds, 'previewCount').textContent = 'Loading…';
+  try {
+    const r = await api('/api/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectPreviewPayload(ds)),
+    });
+    if (!r.n) { throw new Error('No stars pass the current cuts.'); }
+    if (!r.pairs.length) {
+      throw new Error('No plottable columns (need at least RA & Dec).');
+    }
+    ST[ds].preview = { active: true, ids: r.ids, cols: r.columns,
+                       pairs: r.pairs, excluded: new Set(), divs: [] };
+    q(ds, 'previewControls').style.display = 'block';
+    renderPreviewPanels(ds);
+    updatePreviewCount(ds);
+    showError('');
+  } catch (e) {
+    q(ds, 'previewCount').textContent = '';
+    showError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderPreviewPanels(ds) {
+  const pv = ST[ds].preview;
+  const host = q(ds, 'previewPanels');
+  purgePreviewDivs(ds);
+  host.innerHTML = '';
+  pv.divs = [];
+  for (const [xr, yr] of pv.pairs) {
+    const xs = [], ys = [], pid = [];
+    for (let i = 0; i < pv.ids.length; i++) {
+      const xv = pv.cols[xr][i], yv = pv.cols[yr][i];
+      if (xv == null || yv == null) continue;
+      xs.push(xv); ys.push(yv); pid.push(pv.ids[i]);
+    }
+    const div = document.createElement('div');
+    div.className = 'preview-panel';
+    div._pid = pid;
+    div._xs = xs; div._ys = ys;
+    div._xr = xr; div._yr = yr;
+    host.appendChild(div);
+    drawPreviewPanel(ds, div);
+    pv.divs.push(div);
+  }
+}
+
+// Draw (or redraw) one panel. Redrawing with newPlot after every
+// selection is deliberate: a box/lasso leaves a select-outline that
+// otherwise blocks the *next* brush on the same panel, and only a full
+// rebuild clears it (restyle/react keep it). Prior axis ranges are
+// carried over so a redraw doesn't throw away the user's zoom.
+function drawPreviewPanel(ds, div, keepRange) {
+  const xr = div._xr, yr = div._yr, pv = ST[ds].preview;
+  const xlab = PREVIEW_LABELS[xr], ylab = PREVIEW_LABELS[yr];
+  const colors = div._pid.map((id) => pv.excluded.has(id)
+    ? PREVIEW_EXCLUDED_COLOR : DS_COLOR[ds]);
+  const xaxis = { title: { text: xlab } };
+  const yaxis = { title: { text: ylab } };
+  if (keepRange && div._fullLayout) {
+    xaxis.range = div._fullLayout.xaxis.range.slice();
+    yaxis.range = div._fullLayout.yaxis.range.slice();
+    xaxis.autorange = false; yaxis.autorange = false;
+  } else if (xr === 'ra') {
+    xaxis.autorange = 'reversed';
+  }
+  Plotly.newPlot(div, [{
+    type: 'scatter', mode: 'markers', x: div._xs, y: div._ys,
+    customdata: div._pid,
+    marker: { color: colors, size: 6, line: { width: 0 } },
+    hovertemplate: `${xlab}=%{x:.4g}<br>${ylab}=%{y:.4g}`
+      + '<extra></extra>',
+  }], {
+    width: 340, height: 300, margin: { l: 54, r: 12, t: 12, b: 44 },
+    dragmode: 'select', paper_bgcolor: '#fff', plot_bgcolor: '#fff',
+    font: { size: 11 }, xaxis, yaxis,
+  }, { displaylogo: false, responsive: false,
+       modeBarButtonsToAdd: ['select2d', 'lasso2d'] });
+  div.on('plotly_selected', (ev) => onPreviewSelect(ds, ev));
+}
+
+function onPreviewSelect(ds, ev) {
+  const pv = ST[ds].preview;
+  if (!pv || !ev || !ev.points || !ev.points.length) return;
+  const exclude = q(ds, 'sel_mode').value === 'exclude';
+  for (const p of ev.points) {
+    if (exclude) pv.excluded.add(p.customdata);
+    else pv.excluded.delete(p.customdata);
+  }
+  recolorPreview(ds);
+  updatePreviewCount(ds);
+}
+
+// Recolor every panel to reflect the excluded set. Rebuilds (rather than
+// restyles) so the just-drawn selection outline is cleared and the next
+// brush works; keeps each panel's current zoom.
+function recolorPreview(ds) {
+  for (const div of ST[ds].preview.divs) drawPreviewPanel(ds, div, true);
+}
+
+function updatePreviewCount(ds) {
+  const pv = ST[ds].preview;
+  const kept = pv.ids.length - pv.excluded.size;
+  q(ds, 'previewCount').textContent =
+    `Keeping ${kept} of ${pv.ids.length} stars`;
+}
+
+function previewKeptIds(ds) {
+  const pv = ST[ds].preview;
+  if (!pv || !pv.active || pv.excluded.size === 0) return null;
+  return pv.ids.filter((id) => !pv.excluded.has(id));
+}
+
+function purgePreviewDivs(ds) {
+  const pv = ST[ds].preview;
+  if (pv && pv.divs) for (const div of pv.divs) Plotly.purge(div);
+}
+
+// The plots reflect the flag/membership/query cuts, so any change to
+// those makes a loaded selection stale - clear it and prompt a reload.
+function invalidatePreview(ds) {
+  if (!ST[ds].preview) return;
+  purgePreviewDivs(ds);
+  ST[ds].preview = null;
+  q(ds, 'previewControls').style.display = 'none';
+  q(ds, 'previewPanels').innerHTML = '';
+  q(ds, 'previewCount').textContent = 'Cuts changed — reload the plots.';
+}
+
 // --- copy plot images to clipboard ---------------------------------------
 // Briefly show a status on the button (e.g. "Copied!") then restore it.
 function flashButton(btn, msg) {
@@ -1314,6 +1521,23 @@ function wireDataset(ds) {
   q(ds, 'prefillBtn').addEventListener('click', () => onPrefill(ds));
   q(ds, 'rhalf_kpc').addEventListener('input', updateRunButton);
   q(ds, 'distance_kpc').addEventListener('input', updateRunButton);
+
+  // Manual-selection panel.
+  q(ds, 'loadPreviewBtn').addEventListener('click', () => loadPreview(ds));
+  q(ds, 'inclAllBtn').addEventListener('click', () => {
+    if (!ST[ds].preview) return;
+    ST[ds].preview.excluded.clear();
+    recolorPreview(ds); updatePreviewCount(ds);
+  });
+  q(ds, 'exclAllBtn').addEventListener('click', () => {
+    if (!ST[ds].preview) return;
+    ST[ds].preview.excluded = new Set(ST[ds].preview.ids);
+    recolorPreview(ds); updatePreviewCount(ds);
+  });
+  // A loaded selection is only valid for the cuts it was drawn under.
+  for (const ev of ['change', 'input']) {
+    q(ds, 'catalogBox').addEventListener(ev, () => invalidatePreview(ds));
+  }
 }
 
 function initDatasets() {

@@ -205,6 +205,53 @@ def inspect(file: UploadFile):
                 suggestion=suggestion, **inspection)
 
 
+@app.post('/api/preview')
+def preview(payload: dict):
+    """Per-star arrays for the manual-selection plots.
+
+    Applies the same flag/membership/query row cuts the run will (see
+    user_catalog.select_for_preview), and returns each surviving star's
+    catalog row index plus the available plot columns (RA/Dec, and
+    pmra/pmdec, vr/[Fe/H] where present). The frontend plots these, lets
+    the user exclude/keep stars interactively, and sends the kept row
+    indices back to /api/run as `manual_ids`.
+    """
+    upload_id = payload.get('upload_id')
+    if upload_id not in _UPLOADS:
+        raise HTTPException(
+            status_code=400,
+            detail='Unknown upload_id - (re-)upload the catalog first.')
+    try:
+        df = user_catalog.read_catalog(str(_UPLOADS[upload_id]))
+        mapping = user_catalog.resolve_mapping(
+            df, payload.get('columns') or {})
+        data = user_catalog.select_for_preview(
+            df, mapping,
+            flag_requirements=payload.get('flags') or {},
+            mem_prob_min=_opt_float(payload.get('mem_prob_min')),
+            query=payload.get('query'))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    columns = {}
+    for role in user_catalog.PREVIEW_ROLES:
+        column = mapping.get(role)
+        if column is None or column not in data.columns:
+            continue
+        values = pd.to_numeric(data[column], errors='coerce').to_numpy()
+        if not np.isfinite(values).any():
+            continue
+        columns[role] = [None if not np.isfinite(v) else float(v)
+                         for v in values]
+    return dict(
+        n=int(len(data)),
+        ids=[int(i) for i in data.index.to_numpy()],
+        columns=columns,
+        pairs=[list(p) for p in user_catalog.PREVIEW_PAIRS
+               if p[0] in columns and p[1] in columns],
+    )
+
+
 @app.post('/api/run')
 def run(payload: dict):
     """Full inference on a previously-inspected upload: build the
@@ -250,6 +297,7 @@ def run(payload: dict):
                 radius_min=_opt_float(payload.get('radius_min')),
                 radius_max=_opt_float(payload.get('radius_max')),
                 radius_unit=payload.get('radius_unit') or 'kpc',
+                manual_ids=payload.get('manual_ids'),
             )
 
             n_samples = int(payload.get('n_samples') or 1000)

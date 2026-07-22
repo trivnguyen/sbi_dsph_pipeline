@@ -60,8 +60,19 @@ COLUMN_ALIASES = {
                'errvr', 'evlos', 'vrade'),
     'mem_prob': ('memprob', 'prob', 'pmem', 'membershipprob', 'memp',
                  'pmember', 'membership'),
+    # Optional, used only for the manual-selection preview plots (not by
+    # the inference itself - the perspective correction uses the scalar
+    # systemic proper motion from the form, not these per-star columns).
+    'pmra': ('pmra', 'pmracosdec', 'pmrastar'),
+    'pmdec': ('pmdec', 'pmde', 'pmdecstar'),
+    'feh': ('feh', 'fe/h', '[fe/h]', 'metallicity', 'met', 'mh'),
 }
 REQUIRED_ROLES = ('ra', 'dec', 'vr', 'vr_err')
+
+# Roles the manual-selection preview can plot, in (x, y) pairs; a pair
+# is offered only when both its columns are present.
+PREVIEW_ROLES = ('ra', 'dec', 'pmra', 'pmdec', 'vr', 'feh')
+PREVIEW_PAIRS = (('ra', 'dec'), ('pmra', 'pmdec'), ('vr', 'feh'))
 
 # Derived projected-radius columns injected into the catalog before the
 # radius cut, so a custom query can filter on radius too. These names
@@ -385,6 +396,53 @@ def _apply_radius_cut(
     return out
 
 
+def flag_membership_mask(
+    df: pd.DataFrame, mapping: dict, flag_requirements: dict = None,
+    mem_prob_min: float = None,
+) -> np.ndarray:
+    """Boolean keep-mask for the flag and membership-probability cuts -
+    the row selection that does not depend on any system metadata, so
+    both the run and the manual-selection preview apply it identically.
+
+    Raises:
+        ValueError: If a named flag column is not in the catalog.
+    """
+    mask = np.ones(len(df), dtype=bool)
+    for column, required in (flag_requirements or {}).items():
+        if column not in df.columns:
+            raise ValueError(f'Unknown flag column: {column!r}')
+        mask &= _flag_values(df[column]) == bool(required)
+    if 'mem_prob' in mapping and mem_prob_min is not None:
+        mask &= np.nan_to_num(
+            df[mapping['mem_prob']].to_numpy().astype(float)
+        ) > mem_prob_min
+    return mask
+
+
+def select_for_preview(
+    df: pd.DataFrame, mapping: dict, flag_requirements: dict = None,
+    mem_prob_min: float = None, query: str = None,
+) -> pd.DataFrame:
+    """Rows the manual-selection plots should show: the catalog with the
+    flag/membership cuts and a non-radius row-filter query applied, with
+    the original row index preserved so the frontend can send back the
+    kept indices as `manual_ids`.
+
+    A radius-based query is skipped here (it needs a center, which needs
+    the selection) - it still applies at run time.
+
+    Raises:
+        ValueError: If a flag column or the query expression is invalid.
+    """
+    mask = flag_membership_mask(df, mapping, flag_requirements,
+                                mem_prob_min)
+    data = df[mask]
+    query = (query or '').strip()
+    if query and not query_uses_radius(query):
+        data = _query_rows(data, query)
+    return data
+
+
 def resolve_mapping(df: pd.DataFrame, columns: dict = None) -> dict:
     """Final role -> column mapping: auto-detection plus user choices.
 
@@ -554,6 +612,7 @@ def build_target(
     radius_min: float = None,
     radius_max: float = None,
     radius_unit: str = 'kpc',
+    manual_ids: list = None,
 ) -> tuple[TargetData, dict]:
     """Build a TargetData snapshot from a fixed-format user catalog.
 
@@ -598,6 +657,10 @@ def build_target(
             `radius_unit`.
         radius_max: Optional upper projected-radius cut.
         radius_unit: Unit for radius_min/radius_max: 'kpc' or 'arcmin'.
+        manual_ids: Optional explicit list of catalog row indices to
+            keep (the stars the user kept in the manual-selection
+            plots). ANDed with the flag/membership cut; None means no
+            manual selection.
 
     Returns:
         (target, info) - the TargetData snapshot plus a JSON-friendly
@@ -611,19 +674,15 @@ def build_target(
     """
     mapping = resolve_mapping(df, columns)
 
-    mask = np.ones(len(df), dtype=bool)
-    for column, required in (flag_requirements or {}).items():
-        if column not in df.columns:
-            raise ValueError(f'Unknown flag column: {column!r}')
-        mask &= _flag_values(df[column]) == bool(required)
-
-    if 'mem_prob' in mapping and mem_prob_min is not None:
-        mask &= np.nan_to_num(
-            df[mapping['mem_prob']].to_numpy().astype(float)
-        ) > mem_prob_min
+    mask = flag_membership_mask(df, mapping, flag_requirements,
+                                mem_prob_min)
+    if manual_ids is not None:
+        mask &= df.index.isin(list(manual_ids))
     data = df[mask]
     if len(data) == 0:
-        raise ValueError('All stars removed by flag/membership cuts.')
+        raise ValueError(
+            'All stars removed by flag/membership/manual-selection '
+            'cuts.')
 
     # The query defines the member sample, so it runs before any
     # data-driven metadata: in a multi-system catalog it is what picks
@@ -711,5 +770,7 @@ def build_target(
         radius_min=radius_min,
         radius_max=radius_max,
         radius_unit=(radius_unit or 'kpc') if has_radius_cut else None,
+        manual_selection=(None if manual_ids is None
+                          else len(list(manual_ids))),
     )
     return target, info

@@ -184,6 +184,17 @@ The projected radius is also available to the row filter as `R_kpc` and
 `R_arcmin` (e.g. `R_kpc < 5`). These are computed from the center, so
 they replace same-named columns in your file.
 
+### Manual selection (optional)
+
+Section **1b** plots the stars that pass the cuts above - RA-Dec always,
+plus pmra-pmdec and v_los-[Fe/H] when those columns are present - and
+lets you pick which to keep by drawing on the figures (box or lasso
+select). Draw with **exclude selected** to drop outliers, or **Exclude
+all** then **include selected** to keep only a region; grey points are
+excluded, and selections combine across all panels. Click **Load /
+refresh plots** to (re)build them; changing any cut above clears the
+selection. The kept stars are passed to the run as an explicit list.
+
 ## System metadata
 
 The half-light radius **R_half [kpc]** is required - the model
