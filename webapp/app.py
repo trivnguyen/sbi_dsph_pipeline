@@ -24,6 +24,7 @@ import base64
 import os
 import sys
 import threading
+import time
 import traceback
 import uuid
 from collections import OrderedDict
@@ -271,6 +272,9 @@ def run(payload: dict):
     label = str(payload.get('label') or 'user_catalog').strip()
     try:
         with _RUN_LOCK:
+            # Timed from inside the lock, so a queued request reports its
+            # own compute time rather than time spent waiting.
+            t_run = time.perf_counter()
             df = user_catalog.read_catalog(str(_UPLOADS[upload_id]))
             target, info = user_catalog.build_target(
                 df, label=label,
@@ -302,12 +306,14 @@ def run(payload: dict):
 
             n_samples = int(payload.get('n_samples') or 1000)
             n_bins = int(payload.get('n_bins') or 4)
+            t_sample = time.perf_counter()
             posterior = inference.sample_posterior(
                 STATE['model'], target, STATE['norm_dict'],
                 STATE['pre_transforms_config'],
                 n_samples=n_samples, n_mc_conditioning=n_samples,
                 conditioning_dist='gaussian', return_log_prob=False,
                 batch_size=int(payload.get('batch_size') or 512))
+            sampling_sec = time.perf_counter() - t_sample
 
             # Optional rejection cut on the inner slope gamma. We keep
             # the requested sample count fixed and just drop the draws
@@ -353,6 +359,7 @@ def run(payload: dict):
             profiles = inference.profiles_payload(
                 inference.R_VEC_KPC, jeans, vdisp_profile,
                 vkurtosis_profile, wolf)
+            walltime_sec = time.perf_counter() - t_run
     except HTTPException:
         raise
     except ValueError as e:
@@ -363,7 +370,9 @@ def run(payload: dict):
 
     summary = _summary(label, info, posterior)
     summary.update(n_posterior_requested=n_requested,
-                   gamma_min=gamma_min, gamma_max=gamma_max)
+                   gamma_min=gamma_min, gamma_max=gamma_max,
+                   walltime_sec=round(walltime_sec, 2),
+                   walltime_sampling_sec=round(sampling_sec, 2))
     return dict(
         job_id=job_id,
         summary=summary,

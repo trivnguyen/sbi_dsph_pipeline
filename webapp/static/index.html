@@ -378,6 +378,13 @@ function fmt(x, digits = 3) {
     ? x.toExponential(2) : Number(x.toPrecision(digits)).toString();
 }
 
+function fmtDuration(sec) {
+  if (sec === null || sec === undefined || isNaN(sec)) return '';
+  if (sec < 60) return sec.toFixed(1) + ' s';
+  const m = Math.floor(sec / 60);
+  return `${m}m ${Math.round(sec - m * 60)}s`;
+}
+
 function setStatus(text, cls) {
   const el = $('status');
   el.className = cls || '';
@@ -594,7 +601,7 @@ function datasetPanelHTML(ds) {
           <input type="number" id="${ds}_n_bins" value="4"></label>
         <label class="field"><span>Inner slope γ min</span>
           <input type="number" id="${ds}_gamma_min" step="any"
-                 value="-1"></label>
+                 value="0"></label>
         <label class="field"><span>Inner slope γ max</span>
           <input type="number" id="${ds}_gamma_max" step="any"
                  value="2"></label>
@@ -604,8 +611,9 @@ function datasetPanelHTML(ds) {
         profile plots (each bin is a short MCMC fit). The inference is
         unbinned — this does not affect the posterior.</p>
       <p class="hint" style="margin-bottom:0">The model's γ prior spans
-        −1 to 2. Narrowing this (e.g. 0 to 2) keeps only the posterior
-        draws with γ in range — a rejection cut on the fixed number of
+        −1 to 2; this defaults to <b>0 to 2</b>, dropping draws with a
+        negative (outward-rising) inner slope. Set the min to −1 to keep
+        the full prior. It is a rejection cut on the fixed number of
         posterior samples above, so the surviving count (reported after
         the run) will be smaller.</p>
     </fieldset>
@@ -868,6 +876,11 @@ function summaryTable(ds, s) {
   const filterRow = filters.length
     ? `<tr><td>Row filter</td><td>${filters.join('<br>')}</td></tr>`
     : '';
+  const wallRow = s.walltime_sec == null ? '' :
+    `<tr><td>Walltime</td><td>${fmtDuration(s.walltime_sec)}
+       <span style="color:#667085">(${fmtDuration(
+         s.walltime_sampling_sec)} sampling the posterior)</span>
+     </td></tr>`;
   return `<table class="summary">
       <tr><th colspan="2" style="color:${DS_COLOR[ds]}">
         ${s.label} &nbsp;(dataset ${ds})</th></tr>
@@ -883,6 +896,7 @@ function summaryTable(ds, s) {
       <tr><td>Posterior samples</td>
           <td>${postCell} ·
               <a href="/api/posterior/${s.job_id}">download CSV</a></td></tr>
+      ${wallRow}
       <tr><th colspan="2">Posterior (median +84% / −16%)</th></tr>
       ${rows}
     </table>`;
