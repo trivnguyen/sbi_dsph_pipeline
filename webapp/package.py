@@ -266,6 +266,23 @@ location /dsph/ {
 With `--host 127.0.0.1` the app is only reachable through the proxy.
 Anyone who can reach the page can submit runs on your machine, so add
 the basic-auth lines (or equivalent) if the URL is public.
+
+## Credits
+
+**dSph posterior explorer** - built by Tri Nguyen. MIT licensed.
+
+Methods and data this tool builds on:
+
+- Truncated Sequential NPE - Deistler, Goncalves & Macke (2022)
+- Dynamical mass estimator - Wolf et al. (2010)
+- Known-system metadata - local_volume_database
+
+Built with PyTorch, zuko, PyTorch Lightning, PyTorch Geometric, astropy,
+NumPy, SciPy, pandas, emcee, corner.py, Matplotlib, FastAPI, Uvicorn,
+and Plotly.js.
+
+The same credits appear in the app's page footer; edit the `CREDITS`
+block near the top of `static/index.html` to change them.
 '''
 
 

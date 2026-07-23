@@ -133,6 +133,22 @@
     cursor: pointer; min-height: 0;
   }
   .preview-enlarge:hover { background: #f2f4f7; color: var(--accent); }
+  footer#credits {
+    margin-top: 34px; padding: 18px 24px 34px;
+    border-top: 1px solid var(--border); background: var(--panel);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .credits-inner { max-width: 1700px; margin: 0 auto; }
+  .credits-line { margin-top: 5px; }
+  footer#credits a { color: var(--accent); }
+  footer#credits .cite {
+    margin: 8px 0 0; padding: 8px 10px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px;
+    display: inline-block;
+  }
+  .credits-more { margin-top: 10px; }
+  .credits-more summary { cursor: pointer; }
+  .credits-more ul { margin: 6px 0; padding-left: 18px; }
   .spinner {
     display: inline-block; width: 13px; height: 13px;
     border: 2px solid var(--accent); border-top-color: transparent;
@@ -291,6 +307,8 @@
   </section>
 </main>
 
+<footer id="credits"></footer>
+
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
@@ -326,6 +344,69 @@ const PREVIEW_LABELS = {
   pmdec: 'pmdec [mas/yr]', vr: 'v_los [km/s]', feh: '[Fe/H]',
 };
 const PREVIEW_EXCLUDED_COLOR = '#c9ced6';
+
+// --- Credits (shown in the page footer) ----------------------------------
+// Edit these; every field is optional and an empty one is simply omitted.
+// To add the citation, put the full reference in `citation` below, e.g.
+//   citation: 'Nguyen et al. (2026), ApJ 999, 123, doi:10.3847/...'
+// and it renders as a "please cite" block.
+const CREDITS = {
+  app: 'dSph posterior explorer',
+  blurb: 'Amortized neural posterior estimation of dwarf spheroidal '
+    + 'dark-matter density profiles',
+  authors: ['Tri Nguyen'],
+  affiliation: '',
+  contact: '',
+  citation: '',
+  repo: '',
+  license: 'MIT',
+  // Methods and data this tool relies on.
+  references: [
+    ['Truncated Sequential NPE',
+     'Deistler, Goncalves & Macke (2022)'],
+    ['Dynamical mass estimator', 'Wolf et al. (2010)'],
+    ['Known-system metadata', 'local_volume_database'],
+  ],
+  software: ['PyTorch', 'zuko', 'PyTorch Lightning', 'PyTorch Geometric',
+             'astropy', 'NumPy', 'SciPy', 'pandas', 'emcee', 'corner.py',
+             'Matplotlib', 'FastAPI', 'Uvicorn', 'Plotly.js'],
+};
+
+function renderCredits() {
+  const c = CREDITS, e = escapeHtml;
+  const line = [];
+  if (c.authors && c.authors.length) {
+    line.push('Built by <b>' + c.authors.map(e).join(', ') + '</b>'
+      + (c.affiliation ? ' · ' + e(c.affiliation) : ''));
+  }
+  if (c.license) line.push(e(c.license) + '-licensed');
+  if (c.repo) {
+    line.push(`<a href="${e(c.repo)}" target="_blank" rel="noopener">`
+      + 'source</a>');
+  }
+  if (c.contact) {
+    const href = c.contact.includes('@') ? 'mailto:' + c.contact
+      : c.contact;
+    line.push(`<a href="${e(href)}" target="_blank" rel="noopener">`
+      + 'contact</a>');
+  }
+  const cite = c.citation
+    ? `<p class="cite">If you use this in published work, please cite:
+       <b>${e(c.citation)}</b></p>`
+    : '';
+  $('credits').innerHTML = `
+    <div class="credits-inner">
+      <div><b>${e(c.app)}</b> — ${e(c.blurb)}</div>
+      <div class="credits-line">${line.join(' · ')}</div>
+      ${cite}
+      <details class="credits-more">
+        <summary>Methods &amp; software this tool builds on</summary>
+        <ul>${c.references.map(([k, v]) =>
+          `<li>${e(k)} — ${e(v)}</li>`).join('')}</ul>
+        <div>Built with ${c.software.map(e).join(' · ')}.</div>
+      </details>
+    </div>`;
+}
 // Scalar quantities to show as kept-vs-excluded histograms (when present).
 const PREVIEW_HIST = ['vr', 'feh', 'pmra', 'pmdec'];
 
@@ -1757,6 +1838,7 @@ function initDatasets() {
 // --- startup -------------------------------------------------------------
 (async () => {
   initDatasets();
+  renderCredits();
   try {
     const cfg = await api('/api/config');
     $('serverInfo').textContent =
