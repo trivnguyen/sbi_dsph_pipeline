@@ -142,10 +142,12 @@
   .credits-line { margin-top: 5px; }
   footer#credits a { color: var(--accent); }
   footer#credits .cite {
-    margin: 8px 0 0; padding: 8px 10px; background: var(--bg);
+    margin: 10px 0 0; padding: 9px 12px; background: var(--bg);
     border: 1px solid var(--border); border-radius: 7px;
-    display: inline-block;
+    max-width: 900px;
   }
+  footer#credits .cite ul { margin: 6px 0 0; padding-left: 18px; }
+  footer#credits .cite li { margin-bottom: 3px; }
   .credits-more { margin-top: 10px; }
   .credits-more summary { cursor: pointer; }
   .credits-more ul { margin: 6px 0; padding-left: 18px; }
@@ -347,9 +349,9 @@ const PREVIEW_EXCLUDED_COLOR = '#c9ced6';
 
 // --- Credits (shown in the page footer) ----------------------------------
 // Edit these; every field is optional and an empty one is simply omitted.
-// To add the citation, put the full reference in `citation` below, e.g.
-//   citation: 'Nguyen et al. (2026), ApJ 999, 123, doi:10.3847/...'
-// and it renders as a "please cite" block.
+// `citations` entries render as a "please cite" list, each linked to its
+// DOI: { text: 'Author et al. (year), "Title", Journal vol, page',
+//        url: 'https://doi.org/...' }
 const CREDITS = {
   app: 'dSph posterior explorer',
   blurb: 'Amortized neural posterior estimation of dwarf spheroidal '
@@ -357,7 +359,20 @@ const CREDITS = {
   authors: ['Tri Nguyen'],
   affiliation: '',
   contact: '',
-  citation: '',
+  citations: [
+    { text: 'Nguyen et al. (2026), “Dark Matter in Draco and Boötes I: '
+        + 'Hints of a Core in an Ultra-Faint Dwarf from Simulation-Based '
+        + 'Inference”, arXiv:2606.26218',
+      url: 'https://doi.org/10.48550/arXiv.2606.26218' },
+    { text: 'Nguyen et al. (2025), “Trial by FIRE: probing the dark '
+        + 'matter density profile of dwarf galaxies with GraphNPE”, '
+        + 'MNRAS 541, 2707',
+      url: 'https://doi.org/10.1093/mnras/staf1118' },
+    { text: 'Nguyen et al. (2023), “Uncovering dark matter density '
+        + 'profiles in dwarf galaxies with graph neural networks”, '
+        + 'Phys. Rev. D 107, 043015',
+      url: 'https://doi.org/10.1103/PhysRevD.107.043015' },
+  ],
   repo: '',
   license: 'MIT',
   // Methods and data this tool relies on.
@@ -390,9 +405,12 @@ function renderCredits() {
     line.push(`<a href="${e(href)}" target="_blank" rel="noopener">`
       + 'contact</a>');
   }
-  const cite = c.citation
-    ? `<p class="cite">If you use this in published work, please cite:
-       <b>${e(c.citation)}</b></p>`
+  const cite = (c.citations && c.citations.length)
+    ? `<div class="cite"><b>If you use this in published work, please
+         cite:</b>
+       <ul>${c.citations.map((r) => `<li>${e(r.text)}${r.url
+         ? ` · <a href="${e(r.url)}" target="_blank" rel="noopener">`
+           + 'DOI</a>' : ''}</li>`).join('')}</ul></div>`
     : '';
   $('credits').innerHTML = `
     <div class="credits-inner">

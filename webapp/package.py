@@ -271,6 +271,18 @@ the basic-auth lines (or equivalent) if the URL is public.
 
 **dSph posterior explorer** - built by Tri Nguyen. MIT licensed.
 
+If you use this in published work, please cite:
+
+- Nguyen et al. (2026), "Dark Matter in Draco and Bootes I: Hints of a
+  Core in an Ultra-Faint Dwarf from Simulation-Based Inference",
+  arXiv:2606.26218 - <https://doi.org/10.48550/arXiv.2606.26218>
+- Nguyen et al. (2025), "Trial by FIRE: probing the dark matter density
+  profile of dwarf galaxies with GraphNPE", MNRAS 541, 2707 -
+  <https://doi.org/10.1093/mnras/staf1118>
+- Nguyen et al. (2023), "Uncovering dark matter density profiles in
+  dwarf galaxies with graph neural networks", Phys. Rev. D 107, 043015 -
+  <https://doi.org/10.1103/PhysRevD.107.043015>
+
 Methods and data this tool builds on:
 
 - Truncated Sequential NPE - Deistler, Goncalves & Macke (2022)

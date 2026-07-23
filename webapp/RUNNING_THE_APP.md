@@ -112,3 +112,19 @@ it.
 
 If something doesn't work, send along what the terminal printed and
 I'll take a look.
+
+## Citing this
+
+If you use results from this tool in published work, please cite:
+
+- Nguyen et al. (2026), "Dark Matter in Draco and Boötes I: Hints of a
+  Core in an Ultra-Faint Dwarf from Simulation-Based Inference",
+  arXiv:2606.26218 — <https://doi.org/10.48550/arXiv.2606.26218>
+- Nguyen et al. (2025), "Trial by FIRE: probing the dark matter density
+  profile of dwarf galaxies with GraphNPE", MNRAS 541, 2707 —
+  <https://doi.org/10.1093/mnras/staf1118>
+- Nguyen et al. (2023), "Uncovering dark matter density profiles in
+  dwarf galaxies with graph neural networks", Phys. Rev. D 107, 043015 —
+  <https://doi.org/10.1103/PhysRevD.107.043015>
+
+The same list is in the app's page footer.
