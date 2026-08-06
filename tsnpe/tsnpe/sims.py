@@ -45,7 +45,9 @@ def simulator(num_stars: int, params: np.ndarray) -> np.ndarray | None:
     alpha, beta, gamma, log_rdm, log_rhos, beta0, log_ra, log_rstar = params
     r_dm = 10 ** log_rdm
     r_star = 10 ** log_rstar
-    r_a = 10 ** log_ra
+    # NOTE: model r_a is ALWAYS relative to r_star, so we have to convert to
+    # physical r_a in the simulator, and not at the proposal stage
+    r_a = 10 ** log_ra * r_star
     rho_s = 10 ** log_rhos
     try:
         dm_potential = agama.Potential(
