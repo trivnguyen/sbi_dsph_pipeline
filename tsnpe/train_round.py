@@ -124,7 +124,8 @@ def main(config):
         config.training.id = existing_run_id
     config.training.workdir = str(round_dir)
 
-    wandb_logger, project_dir = training.create_wandb_logger(config.training, tag=f'tsnpe-round{r}')
+    wandb_logger, project_dir = training.create_wandb_logger(
+        config.training, tag=f'tsnpe-round{r}')
     # Persist the run id immediately - before training starts - so a crash
     # anywhere after this point (mid-training, or even after training
     # finishes but before this function's own registration below) can be
