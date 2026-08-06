@@ -9,6 +9,8 @@ reparametrization (tsnpe/prior.py), and computes the truncated proposal:
 
 import numpy as np
 import torch
+import warnings
+
 from scipy.special import logsumexp
 from torch_geometric.data import Data, Batch
 from tqdm import tqdm
@@ -65,6 +67,23 @@ def _gaussian_conditioning_draws(
     err = 0.5 * (target.rhalf_kpc_em + target.rhalf_kpc_ep)
     rhalf_mc = np.clip(np.random.normal(target.rhalf_kpc, err, n_mc_conditioning), 1e-6, None)
     return np.log10(rhalf_mc)
+
+def _prior_conditioning_draws(
+    target: TargetData, n_mc_conditioning: int, n_sigma: float = 5.0,
+) -> np.ndarray:
+    """Conditioning draws from the conditioning prior (prior.sample_conditioning).
+
+    What the *proposal* samplers use. Same distribution prior_box hands
+    sample_tilde, so the p(cond)/p_mc(cond) ratio in an importance weight
+    is identically 1 and the plain 1{in S}/q weight is correct. It is also
+    the better importance proposal: the target is uniform over the whole
+    conditioning window, and drawing from the Gaussian instead would put
+    nearly every draw in the middle fifth of a +-5 sigma window and leave
+    the rest carrying real target mass with almost no samples.
+    """
+    return prior_lib.sample_conditioning(
+        target, n_mc_conditioning, n_sigma=n_sigma)
+
 
 def _uniform_conditioning_draws(
     target: TargetData, n_mc_conditioning: int, n_sigma=5
@@ -353,6 +372,7 @@ def sample_posterior(
     conditioning_dist: str = 'gaussian',
     return_log_prob: bool = False,
     batch_size: int = 64,
+    prior_n_sigma: float = 5.0,
 ) -> np.ndarray:
     """Draw posterior samples at the real target's observation, for diagnostics.
 
@@ -387,12 +407,16 @@ def sample_posterior(
     pre_transforms = build_obs_pre_transforms(pre_transforms_config, norm_dict)
     if conditioning_dist == 'gaussian':
         cond_mc = _gaussian_conditioning_draws(target, n_mc_conditioning)
+    elif conditioning_dist == 'prior':
+        cond_mc = _prior_conditioning_draws(
+            target, n_mc_conditioning, n_sigma=prior_n_sigma)
     elif conditioning_dist == 'uniform':
-        cond_mc = _uniform_conditioning_draws(target, n_mc_conditioning, n_sigma=5)
+        cond_mc = _uniform_conditioning_draws(
+            target, n_mc_conditioning, n_sigma=prior_n_sigma)
     else:
         raise ValueError(
             f'conditioning_dist={conditioning_dist} not recognized;'
-            f'must be "gaussian" or "uniform".'
+            f'must be "gaussian", "prior" or "uniform".'
         )
 
     out = _sample_posterior_mc(
@@ -400,16 +424,20 @@ def sample_posterior(
         return_log_prob=return_log_prob, batch_size=batch_size)
     post_all, cond_all, log_q_all = out if return_log_prob else (*out, None)
 
-    # apply prior box cut to posterior draws, then convert to physical units
-    # normalized prior is always [-1, 1] in every dimension, so the cut is simple.
-    in_box = np.all((post_all >= -1) & (post_all <= 1), axis=1)
+    # Convert first, then cut in tilde space via prior_lib.in_prior_box.
+    # A [-1, 1] cut on normalized *physical* theta cannot express this box:
+    # dm_log_rdm is an offset from the conditioning value, so its physical
+    # bounds slide with each row's own cond, and the fixed-bound test admits
+    # offsets outside [0, 3] -- r_dm below r_star, which the tilde box exists
+    # to forbid. (Measured on draco_desi_CoreOM: the old cut admitted offsets
+    # down to -1.40.) 'rejection' was never affected; it draws in tilde space.
+    post_phys_all = _posterior_to_phys(post_all, cond_all, norm_dict, concat=False)
+    in_box = prior_lib.in_prior_box(post_phys_all, target, n_sigma=prior_n_sigma)
     if not in_box.any():
         raise RuntimeError(
             'All posterior samples fell outside the prior box. The '
             'previous round\'s model may not have converged.')
-    post_all = post_all[in_box]
-    cond_all = cond_all[in_box]
-    post_phys_all = _posterior_to_phys(post_all, cond_all, norm_dict, concat=False)
+    post_phys_all = post_phys_all[in_box]
 
     if return_log_prob:
         log_q_all = log_q_all[in_box]
@@ -426,6 +454,7 @@ def estimate_tau(
     n_mc_conditioning: int = 100,
     return_posterior: bool = False,
     batch_size: int = 64,
+    prior_n_sigma: float = 5.0,
 ):
     """Calibrate tau, the epsilon-quantile of in-box posterior log-density.
 
@@ -452,6 +481,7 @@ def estimate_tau(
     """
     post_phys_all, log_q = sample_posterior(
         model, target, norm_dict, pre_transforms_config,
+        prior_n_sigma=prior_n_sigma,
         n_samples=n_post_samples, n_mc_conditioning=n_mc_conditioning,
         return_log_prob=True, batch_size=batch_size)
     post_all, cond_all = post_phys_all[:, :-1], post_phys_all[:, -1]
@@ -525,16 +555,160 @@ def _sample_proposal_rejection(
           f'(drawn={n_drawn:,}, accepted={n_accepted:,})')
 
     proposal_phys = np.concatenate(accepted)[:n_sims]
+    if len(proposal_phys) < n_sims:
+        # The loop also exits on n_drawn >= n_max, and the truncation above
+        # then silently returns short. Loud, because the round trains on
+        # whatever comes back and nothing else would notice.
+        warnings.warn(
+            f'Proposal is short: {len(proposal_phys):,} of {n_sims:,} '
+            f'requested. Rejection sampling exhausted its budget of '
+            f'n_sims * oversample_cap = {n_max:,} draws at an acceptance '
+            f'rate of {acc_rate:.3e}. Raise oversample_cap or epsilon.',
+            RuntimeWarning, stacklevel=2)
+        print(f'  WARNING: short proposal, {len(proposal_phys):,}/{n_sims:,}')
+
     diagnostics = dict(
+        n_requested=int(n_sims), n_returned=int(len(proposal_phys)),
         acceptance_rate=float(acc_rate),
         n_drawn=int(n_drawn), n_accepted=int(n_accepted))
     return proposal_phys, diagnostics
 
 
+def _sample_proposal_flow_rejection(
+    model, target: TargetData, norm_dict: dict, pre_transforms_config: dict,
+    tau: float, n_sims: int, draw_batch: int, batch_size: int,
+    oversample_cap: int, prior_n_sigma: float = 5.0, rng=None,
+):
+    """Exact rejection sampling with the model as the proposal density.
+
+    Draws cond from its prior and theta from q(theta | cond), then keeps a
+    draw with probability exp(tau - log q). Inside the truncated region
+    q >= exp(tau) by construction, so the ratio (uniform target)/q is
+    bounded by exp(-tau) and this is exact, not approximate.
+
+    Two things make the conditioning come out right. The cond draws come
+    from the prior (conditioning_dist='prior'), so the p(cond)/p_mc(cond)
+    factor is 1 and never appears; and the box test runs in tilde space
+    inside sample_posterior, so the r_dm-vs-r_star offset range is
+    enforced. Drawing cond from the Gaussian instead would need an extra
+    1/p_gauss(cond) factor and would leave the window's edges unsampled.
+
+    Every accepted draw is independent and distinct, unlike
+    _sample_proposal_sir, which resamples with replacement.
+
+    Cost against _sample_proposal_rejection is 1 / (exp(tau) * V), V the
+    prior volume in normalized theta -- independent of the truncated
+    region, so this wins once tau > -log(V), i.e. once the posterior has
+    sharpened enough that drawing from the prior stops working.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    n_max = n_sims * oversample_cap
+    accepted = []
+    n_accepted, n_drawn = 0, 0
+
+    pbar = tqdm(total=n_sims, desc='Sampling proposal (flow)', unit='accepted')
+    while n_accepted < n_sims and n_drawn < n_max:
+        theta, log_q = sample_posterior(
+            model, target, norm_dict, pre_transforms_config,
+            n_samples=draw_batch, n_mc_conditioning=draw_batch,
+            conditioning_dist='prior', return_log_prob=True,
+            batch_size=batch_size, prior_n_sigma=prior_n_sigma)
+
+        # The tau test is not optional: below tau, exp(tau - log q) > 1 and
+        # the coin would accept everything.
+        keep = (log_q >= tau) & (np.log(rng.random(len(log_q))) <= tau - log_q)
+        if keep.any():
+            accepted.append(theta[keep])
+            n_accepted += int(keep.sum())
+        n_drawn += draw_batch
+        pbar.update(int(keep.sum()))
+    pbar.close()
+
+    if n_accepted == 0:
+        raise RuntimeError(
+            f'No draws survived rejection at tau={tau:.3f} after '
+            f'{n_drawn:,} draws. Raise epsilon or oversample_cap.')
+
+    acc_rate = n_accepted / n_drawn
+    print(f'  Flow acceptance: {acc_rate:.4e} '
+          f'(drawn={n_drawn:,}, accepted={n_accepted:,})')
+
+    proposal_phys = np.concatenate(accepted)[:n_sims]
+    if len(proposal_phys) < n_sims:
+        warnings.warn(
+            f'Proposal is short: {len(proposal_phys):,} of {n_sims:,} '
+            f'requested. Flow rejection exhausted its budget of '
+            f'n_sims * oversample_cap = {n_max:,} draws at an acceptance '
+            f'rate of {acc_rate:.3e}. Raise oversample_cap or epsilon.',
+            RuntimeWarning, stacklevel=2)
+        print(f'  WARNING: short proposal, {len(proposal_phys):,}/{n_sims:,}')
+
+    diagnostics = dict(
+        n_requested=int(n_sims), n_returned=int(len(proposal_phys)),
+        acceptance_rate=float(acc_rate), n_accepted=int(n_accepted),
+        n_drawn=int(n_drawn))
+    return proposal_phys, diagnostics
+
+
+def calibrate_sampler(
+    model, target: TargetData, norm_dict: dict, pre_transforms_config: dict,
+    tau: float, calibration_draws: int = 20_000, batch_size: int = 64,
+    prior_n_sigma: float = 5.0, rng=None,
+):
+    """Measure both exact samplers' acceptance and pick the cheaper one.
+
+    'rejection' and 'flow' are both exact and never duplicate, so the only
+    thing separating them is cost, and cost is 1 / acceptance. Which one
+    wins moves during a run: their acceptance ratio is exp(tau) * V, so
+    the crossover sits at tau = -log(V) and tau climbs as the posterior
+    sharpens. Early rounds favour 'rejection', later ones 'flow'.
+
+    Returns:
+        (mode, info) - mode is 'rejection' or 'flow'; info holds both
+        measured rates and the draws they cost.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    n = int(calibration_draws)
+
+    pre_transforms = build_obs_pre_transforms(pre_transforms_config, norm_dict)
+    x, pos = _x_obs_features(target)
+    obs_graph = pre_transforms(Data(x=x, pos=pos))
+    cands_tilde = prior_lib.sample_tilde(n, target, n_sigma=prior_n_sigma)
+    if _supports_fast_embedding(model):
+        emb = _embed_observation(model, obs_graph)
+        lq = _log_prob_candidates_fast(model, emb, norm_dict, cands_tilde)
+    else:
+        lq = _log_prob_candidates_safe(
+            model, obs_graph, norm_dict, cands_tilde, batch_size=batch_size)
+    acc_rejection = float((lq >= tau).mean())
+
+    _, log_q = sample_posterior(
+        model, target, norm_dict, pre_transforms_config,
+        n_samples=n, n_mc_conditioning=n, conditioning_dist='prior',
+        return_log_prob=True, batch_size=batch_size,
+        prior_n_sigma=prior_n_sigma)
+    keep = (log_q >= tau) & (np.log(rng.random(len(log_q))) <= tau - log_q)
+    # Denominator is n, not len(log_q): sample_posterior already dropped
+    # out-of-box draws, and those cost model calls just the same.
+    acc_flow = float(keep.sum() / n)
+
+    # Ties and double zeros go to 'flow': its acceptance barely moves across
+    # rounds while 'rejection' is the one that collapses.
+    mode = 'rejection' if acc_rejection > acc_flow else 'flow'
+    info = dict(
+        calibration_draws=2 * n,
+        calibrated_acceptance_rejection=acc_rejection,
+        calibrated_acceptance_flow=acc_flow,
+    )
+    print(f'  Calibration ({2 * n:,} draws): rejection={acc_rejection:.3e}, '
+          f'flow={acc_flow:.3e} -> {mode}')
+    return mode, info
+
+
 def _sample_proposal_sir(
     model, target: TargetData, norm_dict: dict, pre_transforms_config: dict,
     tau: float, n_sims: int, draw_batch: int, batch_size: int,
-    oversample_cap: int,
+    oversample_cap: int, prior_n_sigma: float = 5.0,
 ):
     """Sampling-importance-resampling: draw theta directly from the
     posterior (uniform conditioning distribution, so draws aren't biased
@@ -567,8 +741,8 @@ def _sample_proposal_sir(
         theta, log_q = sample_posterior(
             model, target, norm_dict, pre_transforms_config,
             n_samples=draw_batch, n_mc_conditioning=draw_batch,
-            conditioning_dist='uniform', return_log_prob=True,
-            batch_size=batch_size)
+            conditioning_dist='prior', return_log_prob=True,
+            batch_size=batch_size, prior_n_sigma=prior_n_sigma)
 
         in_tau = log_q >= tau
         logw = np.where(in_tau, -log_q, -np.inf)  # w propto 1{in S} / q (uniform prior)
@@ -592,9 +766,18 @@ def _sample_proposal_sir(
     print(f'  SIR effective sample size: {ess_total:.1f} '
           f'(drawn={n_drawn:,}, total={len(theta_running):,})')
 
+    if ess_total < n_sims:
+        # SIR always returns n_sims rows -- it resamples with replacement --
+        # so a short budget shows up as duplicated draws, not a short array.
+        warnings.warn(
+            f'Proposal is effectively short: ESS {ess_total:.0f} of '
+            f'{n_sims:,} requested, so the returned rows contain repeats. '
+            f'Raise oversample_cap or epsilon.', RuntimeWarning, stacklevel=2)
+        print(f'  WARNING: ESS {ess_total:.0f} < n_sims {n_sims:,}')
+
     diagnostics = dict(
-        ess_total=float(ess_total), n_drawn=int(n_drawn),
-        n_total=int(len(theta_running)))
+        n_requested=int(n_sims), ess_total=float(ess_total),
+        n_drawn=int(n_drawn), n_total=int(len(theta_running)))
     return proposal_phys, diagnostics
 
 
@@ -676,8 +859,20 @@ def sample_tsnpe_proposal(
         return_posterior=return_posterior, batch_size=batch_size)
     tau, posterior_phys = tau_result if return_posterior else (tau_result, None)
 
+    calibration = {}
+    if sampling_mode == 'auto':
+        sampling_mode, calibration = calibrate_sampler(
+            model, target, norm_dict, pre_transforms_config, tau,
+            batch_size=batch_size, prior_n_sigma=prior_n_sigma)
+        calibration['sampling_mode'] = sampling_mode
+
     if sampling_mode == 'rejection':
         proposal_phys, diagnostics = _sample_proposal_rejection(
+            model, target, norm_dict, pre_transforms_config, tau,
+            n_sims=n_sims, draw_batch=draw_batch, batch_size=batch_size,
+            oversample_cap=oversample_cap, prior_n_sigma=prior_n_sigma)
+    elif sampling_mode == 'flow':
+        proposal_phys, diagnostics = _sample_proposal_flow_rejection(
             model, target, norm_dict, pre_transforms_config, tau,
             n_sims=n_sims, draw_batch=draw_batch, batch_size=batch_size,
             oversample_cap=oversample_cap, prior_n_sigma=prior_n_sigma)
@@ -685,13 +880,14 @@ def sample_tsnpe_proposal(
         proposal_phys, diagnostics = _sample_proposal_sir(
             model, target, norm_dict, pre_transforms_config, tau,
             n_sims=n_sims, draw_batch=draw_batch, batch_size=batch_size,
-            oversample_cap=oversample_cap)
+            oversample_cap=oversample_cap, prior_n_sigma=prior_n_sigma)
     else:
         raise ValueError(
             f"sampling_mode={sampling_mode!r} not recognized; "
-            "must be 'rejection' or 'sir'.")
+            "must be 'auto', 'rejection', 'flow' or 'sir'.")
 
     diagnostics['tau'] = tau
+    diagnostics.update(calibration)
     if return_posterior:
         return proposal_phys, diagnostics, posterior_phys
     return proposal_phys, diagnostics

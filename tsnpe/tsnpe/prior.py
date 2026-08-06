@@ -51,6 +51,63 @@ def conditioning_bounds(target: TargetData, n_sigma: float = 5.0) -> tuple[float
     )
 
 
+def sample_conditioning(
+    target: TargetData, n_samples: int, n_sigma: float = 5.0,
+) -> np.ndarray:
+    """Draw the conditioning dimension from its *prior*.
+
+    Uniform in log10(r_half), i.e. exactly the conditioning marginal
+    prior_box hands sample_tilde. The single definition of the
+    conditioning prior, so the proposal samplers cannot drift into a
+    different one: an importance weight of 1{...}/q is only correct when
+    the conditioning draws come from this, and drawing from anything else
+    silently tilts the proposal in the conditioning dimension.
+
+    Not the spectroscopic likelihood, deliberately. That belongs to the
+    posterior (see _gaussian_conditioning_draws); the proposal is drawn
+    from the prior, and the measured r_half is the unreliable quantity
+    this whole conditioning scheme exists to keep out of it.
+
+    Args:
+        target: Target snapshot resolving the conditioning bounds.
+        n_samples: Number of draws.
+        n_sigma: Passed to `conditioning_bounds`; must match the
+            `prior_n_sigma` the proposal samplers use.
+
+    Returns:
+        (n_samples,) log10(r_half [kpc]) draws.
+    """
+    cond_min, cond_max = conditioning_bounds(target, n_sigma=n_sigma)
+    return np.random.uniform(cond_min, cond_max, n_samples)
+
+
+def in_prior_box(
+    theta_phys: np.ndarray, target: TargetData, n_sigma: float = 5.0,
+) -> np.ndarray:
+    """Mask of physical-unit rows lying inside the prior box.
+
+    Checked in *tilde* space, which is where the box is defined. A cut on
+    physical theta cannot express it: `dm_log_rdm` is an offset from the
+    conditioning value, so its physical bounds slide with each row's own
+    conditioning draw. Testing physical values against fixed bounds admits
+    rows whose offset is outside [0, 3] -- i.e. r_dm below r_star, which
+    the tilde box exists to forbid.
+
+    Args:
+        theta_phys: (N, 8) physical-unit rows, ALL_PARAM_NAMES order.
+        target: Target snapshot resolving the conditioning bounds.
+        n_sigma: Passed to `conditioning_bounds`.
+
+    Returns:
+        (N,) boolean mask.
+    """
+    tilde = to_tilde(np.asarray(theta_phys, dtype=float))
+    prior_min, prior_max = prior_box(target, n_sigma=n_sigma)
+    lo = prior_min.numpy()
+    hi = prior_max.numpy()
+    return np.all((tilde >= lo) & (tilde <= hi), axis=-1)
+
+
 def prior_box(target: TargetData, n_sigma: float = 5.0) -> tuple[torch.Tensor, torch.Tensor]:
     """Full 8D prior box: fixed base params + conditioning bounds from `target`.
 
