@@ -22,6 +22,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 from pathlib import Path
 
+import torch
 import wandb
 import pytorch_lightning as pl
 from absl import flags
@@ -37,6 +38,12 @@ from tsnpe import prior
 from jgnn import datasets, training
 from jgnn.transforms import build_transformation
 from jgnn.callbacks.visualization import NPEVisualizationCallback
+
+# torch's default intra-op pool is sized from os.cpu_count(), which under
+# SLURM is the whole node rather than this job's cpus-per-task -- 96
+# threads fighting over 24 CPUs. The GPU does the real work, but graph
+# collation and the pre_transform pipeline run here.
+torch.set_num_threads(len(os.sched_getaffinity(0)))
 
 
 def prepare_data(config, data_path, norm_dict, pre_transforms_config):

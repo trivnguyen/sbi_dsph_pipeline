@@ -1,6 +1,6 @@
 """TSNPE (Deistler et al. 2022) truncated-proposal sampler.
 
-Reads the real target's observation, applies the tilde/conditioning
+Reads the real target's observation, applies the r_star-units/conditioning
 reparametrization (tsnpe/prior.py), and computes the truncated proposal:
 1. sample the posterior at Monte-Carlo conditioning values
 2. estimate tau from those samples (estimate_tau)
@@ -74,7 +74,7 @@ def _prior_conditioning_draws(
     """Conditioning draws from the conditioning prior (prior.sample_conditioning).
 
     What the *proposal* samplers use. Same distribution prior_box hands
-    sample_tilde, so the p(cond)/p_mc(cond) ratio in an importance weight
+    sample_prior_box, so the p(cond)/p_mc(cond) ratio in an importance weight
     is identically 1 and the plain 1{in S}/q weight is correct. It is also
     the better importance proposal: the target is uniform over the whole
     conditioning window, and drawing from the Gaussian instead would put
@@ -276,9 +276,9 @@ def _sample_posterior_mc(
         return_log_prob=return_log_prob, batch_size=batch_size)
 
 
-def _normalize(theta_tilde: np.ndarray, norm_dict: dict):
-    """Map tilde samples to the model's (theta_norm, cond_norm)."""
-    theta_phys = prior_lib.to_physical(theta_tilde)
+def _normalize(theta_box: np.ndarray, norm_dict: dict):
+    """Map box-space samples to the model's (theta_norm, cond_norm)."""
+    theta_phys = prior_lib.to_kpc(theta_box)
     n_base = len(prior_lib.PARAM_NAMES)
     theta_loc = np.asarray(norm_dict['theta_loc'])
     theta_scale = np.asarray(norm_dict['theta_scale'])
@@ -292,7 +292,7 @@ def _normalize(theta_tilde: np.ndarray, norm_dict: dict):
 
 
 def _log_prob_candidates_fast(
-    model, graph_embedding: torch.Tensor, norm_dict: dict, theta_tilde_batch,
+    model, graph_embedding: torch.Tensor, norm_dict: dict, theta_box_batch,
 ):
     """Fast path for _log_prob_candidates - see _embed_observation and
     _supports_fast_embedding. theta only ever feeds dist.log_prob(theta),
@@ -302,7 +302,7 @@ def _log_prob_candidates_fast(
     one chunk) and broadcast-added to every candidate's cheap
     conditional_mlp(cond) output.
     """
-    theta_norm, cond_norm = _normalize(theta_tilde_batch, norm_dict)
+    theta_norm, cond_norm = _normalize(theta_box_batch, norm_dict)
     with torch.no_grad():
         cond_tensor = torch.tensor(
             cond_norm, dtype=torch.float32, device=graph_embedding.device)
@@ -316,9 +316,9 @@ def _log_prob_candidates_fast(
 
 
 def _log_prob_candidates_safe(
-    model, obs_graph, norm_dict, theta_tilde_batch, batch_size=64,
+    model, obs_graph, norm_dict, theta_box_batch, batch_size=64,
 ):
-    """Evaluate log q(theta | conditioning) for a batch of tilde candidates.
+    """Evaluate log q(theta | conditioning) for a batch of box-space candidates.
 
     General path via the model's public API (model.logprob_from_batch) -
     used when _supports_fast_embedding(model) is False. obs_graph is the
@@ -330,7 +330,7 @@ def _log_prob_candidates_safe(
     `pre_transforms=None` below is intentional; relies on the model itself
     having no pre_transforms of its own (see _sample_posterior_mc_safe).
     """
-    theta_norm, cond_norm = _normalize(theta_tilde_batch, norm_dict)
+    theta_norm, cond_norm = _normalize(theta_box_batch, norm_dict)
     n = len(theta_norm)
     log_probs = []
     for start in tqdm(range(0, n, batch_size), desc='Log-prob candidates', unit='batch'):
@@ -424,13 +424,14 @@ def sample_posterior(
         return_log_prob=return_log_prob, batch_size=batch_size)
     post_all, cond_all, log_q_all = out if return_log_prob else (*out, None)
 
-    # Convert first, then cut in tilde space via prior_lib.in_prior_box.
-    # A [-1, 1] cut on normalized *physical* theta cannot express this box:
-    # dm_log_rdm is an offset from the conditioning value, so its physical
-    # bounds slide with each row's own cond, and the fixed-bound test admits
-    # offsets outside [0, 3] -- r_dm below r_star, which the tilde box exists
-    # to forbid. (Measured on draco_desi_CoreOM: the old cut admitted offsets
-    # down to -1.40.) 'rejection' was never affected; it draws in tilde space.
+    # Convert first, then cut in box space via prior_lib.in_prior_box.
+    # Under RADIUS_UNITS='kpc' a [-1, 1] cut on normalized theta cannot
+    # express this box: dm_log_rdm is an offset from the conditioning value,
+    # so its kpc bounds slide with each row's own cond, and the fixed-bound
+    # test admits offsets outside [0, 3] -- r_dm below r_star, which the box
+    # exists to forbid. (Measured on draco_desi_CoreOM: the old cut admitted
+    # offsets down to -1.40.) 'rejection' was never affected; it draws in
+    # box space already.
     post_phys_all = _posterior_to_phys(post_all, cond_all, norm_dict, concat=False)
     in_box = prior_lib.in_prior_box(post_phys_all, target, n_sigma=prior_n_sigma)
     if not in_box.any():
@@ -531,15 +532,15 @@ def _sample_proposal_rejection(
 
     pbar = tqdm(total=n_sims, desc='Sampling proposal', unit='accepted')
     while n_accepted < n_sims and n_drawn < n_max:
-        cands_tilde = prior_lib.sample_tilde(draw_batch, target, n_sigma=prior_n_sigma)
+        cands_box = prior_lib.sample_prior_box(draw_batch, target, n_sigma=prior_n_sigma)
         if use_fast:
-            lq = _log_prob_candidates_fast(model, graph_embedding, norm_dict, cands_tilde)
+            lq = _log_prob_candidates_fast(model, graph_embedding, norm_dict, cands_box)
         else:
             lq = _log_prob_candidates_safe(
-                model, obs_graph, norm_dict, cands_tilde, batch_size=batch_size)
+                model, obs_graph, norm_dict, cands_box, batch_size=batch_size)
         mask = lq >= tau
         if mask.any():
-            accepted.append(prior_lib.to_physical(cands_tilde[mask]))
+            accepted.append(prior_lib.to_kpc(cands_box[mask]))
             n_accepted += int(mask.sum())
         n_drawn += draw_batch
         pbar.update(int(mask.sum()))
@@ -563,7 +564,9 @@ def _sample_proposal_rejection(
             f'Proposal is short: {len(proposal_phys):,} of {n_sims:,} '
             f'requested. Rejection sampling exhausted its budget of '
             f'n_sims * oversample_cap = {n_max:,} draws at an acceptance '
-            f'rate of {acc_rate:.3e}. Raise oversample_cap or epsilon.',
+            f'rate of {acc_rate:.3e}; {int(np.ceil(n_sims / acc_rate)):,} '
+            f'draws would be needed. Raise oversample_cap, raise epsilon, '
+            f"or switch to sampling_mode='flow'.",
             RuntimeWarning, stacklevel=2)
         print(f'  WARNING: short proposal, {len(proposal_phys):,}/{n_sims:,}')
 
@@ -588,7 +591,7 @@ def _sample_proposal_flow_rejection(
 
     Two things make the conditioning come out right. The cond draws come
     from the prior (conditioning_dist='prior'), so the p(cond)/p_mc(cond)
-    factor is 1 and never appears; and the box test runs in tilde space
+    factor is 1 and never appears; and the box test runs in box space
     inside sample_posterior, so the r_dm-vs-r_star offset range is
     enforced. Drawing cond from the Gaussian instead would need an extra
     1/p_gauss(cond) factor and would leave the window's edges unsampled.
@@ -673,13 +676,13 @@ def calibrate_sampler(
     pre_transforms = build_obs_pre_transforms(pre_transforms_config, norm_dict)
     x, pos = _x_obs_features(target)
     obs_graph = pre_transforms(Data(x=x, pos=pos))
-    cands_tilde = prior_lib.sample_tilde(n, target, n_sigma=prior_n_sigma)
+    cands_box = prior_lib.sample_prior_box(n, target, n_sigma=prior_n_sigma)
     if _supports_fast_embedding(model):
         emb = _embed_observation(model, obs_graph)
-        lq = _log_prob_candidates_fast(model, emb, norm_dict, cands_tilde)
+        lq = _log_prob_candidates_fast(model, emb, norm_dict, cands_box)
     else:
         lq = _log_prob_candidates_safe(
-            model, obs_graph, norm_dict, cands_tilde, batch_size=batch_size)
+            model, obs_graph, norm_dict, cands_box, batch_size=batch_size)
     acc_rejection = float((lq >= tau).mean())
 
     _, log_q = sample_posterior(
@@ -702,6 +705,9 @@ def calibrate_sampler(
     )
     print(f'  Calibration ({2 * n:,} draws): rejection={acc_rejection:.3e}, '
           f'flow={acc_flow:.3e} -> {mode}')
+    if acc_rejection == 0.0 and acc_flow == 0.0:
+        print('    WARNING: neither sampler accepted anything in the probe; '
+              'raise epsilon or calibration_draws')
     return mode, info
 
 
@@ -771,8 +777,10 @@ def _sample_proposal_sir(
         # so a short budget shows up as duplicated draws, not a short array.
         warnings.warn(
             f'Proposal is effectively short: ESS {ess_total:.0f} of '
-            f'{n_sims:,} requested, so the returned rows contain repeats. '
-            f'Raise oversample_cap or epsilon.', RuntimeWarning, stacklevel=2)
+            f'{n_sims:,} requested. SIR exhausted its budget of '
+            f'n_sims * oversample_cap = {n_sims * oversample_cap:,} draws, '
+            f'so the {n_sims:,} returned rows contain repeats. Raise '
+            f'oversample_cap or epsilon.', RuntimeWarning, stacklevel=2)
         print(f'  WARNING: ESS {ess_total:.0f} < n_sims {n_sims:,}')
 
     diagnostics = dict(
@@ -795,20 +803,32 @@ def sample_tsnpe_proposal(
     oversample_cap: int = 500,
     prior_n_sigma: float = 5.0,
     sampling_mode: str = 'rejection',
+    calibration_draws: int = 20_000,
     return_posterior: bool = False,
 ):
     """Draw a TSNPE-truncated proposal for the next simulation round.
 
     Estimates tau (estimate_tau), then draws n_sims samples from the
-    tau-truncated region via sampling_mode:
-    - 'rejection' (default): rejection-sample the prior - see
-      _sample_proposal_rejection. Yields a proper distribution (the prior
-      truncated to the tau-region), so standard NLL training needs no
-      importance correction.
-    - 'sir': sampling-importance-resampling directly from the posterior -
-      see _sample_proposal_sir. Can be far more sample-efficient when the
-      prior acceptance rate is low, at the cost of only approximate i.i.d.
-      draws (importance-weight degeneracy).
+    tau-truncated region via sampling_mode. All of them target the same
+    distribution -- the prior truncated to {q >= tau} -- so it is a proper
+    distribution either way and standard NLL training needs no importance
+    correction.
+    - 'rejection' (default): rejection-sample the prior. Exact and
+      duplicate-free; degrades as the truncated region shrinks relative
+      to the prior box.
+    - 'flow': rejection-sample the *model*, exploiting q >= exp(tau)
+      inside the region to bound the acceptance probability. Also exact
+      and duplicate-free, and cheaper than 'rejection' once
+      tau > -log(prior volume in normalized theta) -- i.e. in the later
+      rounds where 'rejection' starts running out of budget.
+    - 'sir': sampling-importance-resampling directly from the posterior.
+      Same target, but resamples with replacement, so a sizable fraction
+      of the returned rows are duplicates and the draws are only
+      approximately i.i.d. Prefer 'flow'.
+    - 'auto': measure both exact samplers on a short probe and run
+      whichever accepts more (calibrate_sampler). The crossover moves
+      between rounds, so this is the setting that does not need revisiting
+      as a run progresses.
 
     Args:
         model: Trained NPE model (jgnn.models.NPE).
@@ -830,7 +850,10 @@ def sample_tsnpe_proposal(
         prior_n_sigma: Half-width (in units of rhalf's uncertainty) of the
             conditioning dimension's prior window; see
             tsnpe.prior.conditioning_bounds. Only used by sampling_mode='rejection'.
-        sampling_mode: 'rejection' or 'sir' - see above.
+        sampling_mode: 'auto', 'rejection', 'flow' or 'sir' - see above.
+        calibration_draws: Draws given to each candidate sampler when
+            sampling_mode='auto'. Costs 2x this in model calls, which is a
+            rounding error against the sampling run it steers.
         return_posterior: If True, also return the posterior samples drawn
             for tau calibration (see estimate_tau) - avoids a second,
             redundant sample_posterior call for diagnostics.
@@ -849,7 +872,8 @@ def sample_tsnpe_proposal(
         RuntimeError: If every posterior sample falls outside the prior box,
             or (sampling_mode='rejection') no prior candidates pass the
             tau filter.
-        ValueError: If sampling_mode isn't 'rejection' or 'sir'.
+        ValueError: If sampling_mode isn't one of 'auto', 'rejection',
+            'flow' or 'sir'.
     """
     model.eval()
     tau_result = estimate_tau(
@@ -863,6 +887,7 @@ def sample_tsnpe_proposal(
     if sampling_mode == 'auto':
         sampling_mode, calibration = calibrate_sampler(
             model, target, norm_dict, pre_transforms_config, tau,
+            calibration_draws=calibration_draws,
             batch_size=batch_size, prior_n_sigma=prior_n_sigma)
         calibration['sampling_mode'] = sampling_mode
 
@@ -887,6 +912,8 @@ def sample_tsnpe_proposal(
             "must be 'auto', 'rejection', 'flow' or 'sir'.")
 
     diagnostics['tau'] = tau
+    # Records which sampler ran and what the probe measured, so a round's
+    # choice is recoverable from state.json without re-deriving it.
     diagnostics.update(calibration)
     if return_posterior:
         return proposal_phys, diagnostics, posterior_phys
