@@ -16,6 +16,13 @@ import warnings
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
+# Make single-threaded OpenMP the process-wide default, so each of the
+# n_jobs worker processes runs one thread instead of one per core. Without
+# it the pool oversubscribes by n_workers-fold, which is slower than
+# running serially. Must be set before the import chain that reaches
+# agama, i.e. before tsnpe.sims below.
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+
 import corner
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,7 +40,45 @@ from tsnpe.model_io import build_npe
 from tsnpe.sims import run_simulation_batch, write_graph_dataset
 
 
-def plot_corner(samples, labels, save_path, title, color='steelblue'):
+def resolve_truths(target_config):
+    """Order `config.target.true_params` into `prior.ALL_PARAM_NAMES` order.
+
+    Keyed by name rather than taken positionally on purpose: a truth list
+    silently written in the wrong order would mark the wrong crosshairs on
+    every corner plot, and nothing downstream would notice.
+
+    Args:
+        target_config: `config.target`. `true_params` is optional -- a real
+            observation has no truth, and None means no crosshairs.
+
+    Returns:
+        A length-8 list in `prior.ALL_PARAM_NAMES` order, or None.
+
+    Raises:
+        ValueError: If `true_params` names a parameter that is not in
+            `prior.ALL_PARAM_NAMES`, or omits one that is.
+    """
+    true_params = target_config.get('true_params')
+    if not true_params:
+        return None
+
+    true_params = dict(true_params)
+    unknown = sorted(set(true_params) - set(prior.ALL_PARAM_NAMES))
+    if unknown:
+        raise ValueError(
+            f'config.target.true_params has unknown parameter(s) {unknown}; '
+            f'expected names from {prior.ALL_PARAM_NAMES}')
+    missing = [n for n in prior.ALL_PARAM_NAMES if n not in true_params]
+    if missing:
+        raise ValueError(
+            f'config.target.true_params is missing {missing}; give every '
+            'parameter or leave the whole field unset')
+
+    return [float(true_params[name]) for name in prior.ALL_PARAM_NAMES]
+
+
+def plot_corner(samples, labels, save_path, title, color='steelblue',
+                truths=None, num_max_samples=10000):
     """Save a corner plot of samples, physical units.
 
     Args:
@@ -42,17 +87,82 @@ def plot_corner(samples, labels, save_path, title, color='steelblue'):
         save_path: Destination image path.
         title: Plot title (N is appended automatically).
         color: corner.corner's `color`.
+        truths: Length-D true values to mark, or None. Use
+            `resolve_truths` rather than building this by hand -- it has
+            to be in the same column order as `samples`.
+        num_max_samples: Draws are subsampled to this before plotting.
     """
+    # downsample for speed: corner.corner is O(N^2) in the number of samples.
+    if len(samples) > num_max_samples:
+        idx = np.random.choice(len(samples), num_max_samples, replace=False)
+        samples = samples[idx]
+
     fig = corner.corner(
         samples, labels=labels, show_titles=True, title_fmt='.2f',
         title_kwargs={'fontsize': 10}, quantiles=[0.16, 0.5, 0.84],
         label_kwargs={'fontsize': 11}, color=color,
         hist_kwargs={'density': True}, plot_density=True,
+        truths=truths, truth_color='crimson',
     )
     fig.suptitle(f'{title} (N={len(samples)})', y=1.01, fontsize=13)
     fig.savefig(save_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
     print(f'[Plot] Saved corner plot -> {save_path}')
+
+
+PROPOSAL_FILES = ('proposal_phys.npy', 'posterior_phys.npy',
+                  'diagnostics.json', 'proposal_settings.json')
+
+
+def proposal_settings(config, prev_checkpoint):
+    """Everything that determines the proposal, for the resume check."""
+    return {
+        'proposal': dict(config.proposal),
+        'checkpoint': str(prev_checkpoint),
+        'seed': int(config.seed),
+        'round': int(config.round),
+    }
+
+
+def load_cached_proposal(round_dir, settings):
+    """Reuse a proposal a previous attempt already drew, if it still fits.
+
+    Drawing the proposal costs a checkpoint load, a tau calibration over
+    n_post_samples, and the sampling loop itself; the simulation that
+    follows is far longer and far more likely to be what hit the wall
+    clock. Re-running the whole step to get back to where it crashed is
+    pure waste, so the round's own files are reused when they exist.
+
+    Guarded on `proposal_settings`: a cache drawn under a different
+    n_sims, epsilon, sampling_mode or checkpoint describes a different
+    distribution, and silently simulating it would be worse than redoing
+    the work. Delete the round's .npy files to force a fresh draw.
+
+    Args:
+        round_dir: The round's directory.
+        settings: `proposal_settings` for the run about to happen.
+
+    Returns:
+        (proposal_phys, diagnostics, posterior_phys), or None to draw fresh.
+    """
+    if not all((round_dir / name).exists() for name in PROPOSAL_FILES):
+        return None
+
+    cached = json.loads((round_dir / 'proposal_settings.json').read_text())
+    if cached != settings:
+        changed = sorted(
+            k for k in set(cached) | set(settings)
+            if cached.get(k) != settings.get(k))
+        print(f'[Proposal] Ignoring the cached proposal in {round_dir}: '
+              f'{changed} changed since it was drawn.')
+        return None
+
+    proposal_phys = np.load(round_dir / 'proposal_phys.npy')
+    posterior_phys = np.load(round_dir / 'posterior_phys.npy')
+    diagnostics = json.loads((round_dir / 'diagnostics.json').read_text())
+    print(f'[Proposal] Reusing the proposal already drawn in {round_dir} '
+          f'({len(proposal_phys):,} draws); skipping the sampling step.')
+    return proposal_phys, diagnostics, posterior_phys
 
 
 def main(config):
@@ -75,9 +185,14 @@ def main(config):
               f'({state.data_path(r)}). Nothing to do.')
         return
 
-    pl.seed_everything(config.seed + r)
-    np.random.seed(config.seed + r)
-
+    # Round-specific children of the run seed, rather than
+    # `config.seed + r`: that collides across runs (seed 0 round 1 is
+    # seed 1 round 0) and reuses one stream for both consumers.
+    global_seq, star_seq = np.random.SeedSequence([config.seed, r]).spawn(2)
+    # seed_everything covers random/numpy/torch; generate_state is uint32,
+    # which is exactly its allowed range.
+    pl.seed_everything(int(global_seq.generate_state(1)[0]))
+    star_rng = np.random.default_rng(star_seq)
 
     round_dir = state.run_dir / f'round_{r}'
     round_dir.mkdir(parents=True, exist_ok=True)
@@ -90,39 +205,55 @@ def main(config):
     pre_transforms_config = json.loads(state.pre_transforms_config_path().read_text())
     prev_checkpoint = state.checkpoint_path(r - 1)
 
-    print(f'[Model] Warm-starting from round {r - 1}: {prev_checkpoint}')
-    # pre_transforms=None: sample_tsnpe_proposal always builds its own
-    # observation-only pre_transforms and passes it explicitly, so the
-    # model never falls back to a self.pre_transforms of its own.
-    model = build_npe(model_config, None, norm_dict)
-    # weights_only=False: round >= 2 loads a full Lightning checkpoint, not
-    # just a state_dict; safe since it's always our own pipeline's output.
-    checkpoint = torch.load(prev_checkpoint, map_location='cpu', weights_only=False)
-    model.load_state_dict(checkpoint['state_dict'])
-    model.eval()
+    settings = proposal_settings(config, prev_checkpoint)
+    cached = load_cached_proposal(round_dir, settings)
 
-    print('[Proposal] Sampling TSNPE-truncated proposal...')
-    proposal_phys, diagnostics, posterior_phys = sample_tsnpe_proposal(
-        model, target, norm_dict, pre_transforms_config,
-        return_posterior=True, **config.proposal)
-    print(f'  proposal_phys : {proposal_phys.shape}')
-    print(f'  diagnostics   : {diagnostics}')
+    if cached is not None:
+        proposal_phys, diagnostics, posterior_phys = cached
+    else:
+        print(f'[Model] Warm-starting from round {r - 1}: {prev_checkpoint}')
+        # pre_transforms=None: sample_tsnpe_proposal always builds its own
+        # observation-only pre_transforms and passes it explicitly, so the
+        # model never falls back to a self.pre_transforms of its own.
+        model = build_npe(model_config, None, norm_dict)
+        # weights_only=False: round >= 2 loads a full Lightning checkpoint,
+        # not just a state_dict; safe since it's always our own output.
+        checkpoint = torch.load(
+            prev_checkpoint, map_location='cpu', weights_only=False)
+        model.load_state_dict(checkpoint['state_dict'])
+        model.eval()
 
-    np.save(round_dir / 'proposal_phys.npy', proposal_phys)
-    np.save(round_dir / 'posterior_phys.npy', posterior_phys)
-    with open(round_dir / 'diagnostics.json', 'w') as f:
-        json.dump(diagnostics, f, indent=2)
+        print('[Proposal] Sampling TSNPE-truncated proposal...')
+        proposal_phys, diagnostics, posterior_phys = sample_tsnpe_proposal(
+            model, target, norm_dict, pre_transforms_config,
+            return_posterior=True, **config.proposal)
+        print(f'  proposal_phys : {proposal_phys.shape}')
+        print(f'  diagnostics   : {diagnostics}')
+
+        # Settings last: it is what load_cached_proposal keys on, so it
+        # must not appear before the arrays it describes are on disk.
+        np.save(round_dir / 'proposal_phys.npy', proposal_phys)
+        np.save(round_dir / 'posterior_phys.npy', posterior_phys)
+        with open(round_dir / 'diagnostics.json', 'w') as f:
+            json.dump(diagnostics, f, indent=2)
+        with open(round_dir / 'proposal_settings.json', 'w') as f:
+            json.dump(settings, f, indent=2)
+
+    truths = resolve_truths(config.target)
+    if truths is not None:
+        print(f'[Plot] Marking truth: '
+              f'{dict(zip(prior.ALL_PARAM_NAMES, truths))}')
 
     plot_corner(
         proposal_phys, prior.ALL_PARAM_NAMES, round_dir / 'proposal_corner.png',
-        'Proposal samples')
+        'Proposal samples', truths=truths)
     plot_corner(
         posterior_phys, prior.ALL_PARAM_NAMES, round_dir / 'posterior_corner.png',
-        'Posterior samples', color='darkorange')
+        'Posterior samples', color='darkorange', truths=truths)
 
     print('[Simulate] Running Agama simulation batch...')
     sim_cfg = config.simulation
-    n_stars = np.random.poisson(
+    n_stars = star_rng.poisson(
         sim_cfg.n_stars_mean, len(proposal_phys)).tolist()
     theta, posvel_list = run_simulation_batch(
         proposal_phys, n_stars, n_jobs=sim_cfg.n_jobs,
@@ -135,8 +266,13 @@ def main(config):
         headers={
             'name': f'{target.key}_tsnpe_round{r}', 'round': r,
             'n_sims_requested': config.proposal.n_sims,
-            'tau': diagnostics['tau'],
-            'acceptance_rate': diagnostics['acceptance_rate'],
+            # Carried verbatim rather than cherry-picked: the sampling
+            # modes report different fields ('rejection'/'flow' give
+            # acceptance_rate/n_accepted, 'sir' gives ess_total/n_total),
+            # and naming one of them here KeyErrors under the others --
+            # after the whole simulation batch has already run. All of
+            # them are scalars, so they store as HDF5 attrs unchanged.
+            **diagnostics,
         },
     )
     n_success = len(posvel_list)
