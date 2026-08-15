@@ -161,6 +161,7 @@ def _resolve_checkpoint(pretrained_config):
 
 def register_pretrained(config, state: RunState) -> None:
     """Register config.pretrained's checkpoint as round 0 in config.run_dir."""
+    run_prior = prior.Prior.from_dict(dict(config.get('prior', {})))
     if state.base is not None:
         print(f"[Base] Already registered in {state.run_dir}.")
         return
@@ -173,7 +174,7 @@ def register_pretrained(config, state: RunState) -> None:
         print("[Base] random_init=True: using a freshly-initialized debug model.")
         model_config = debug_model_config()
         pre_transforms_config = debug_pre_transforms_config()
-        norm_dict = prior.default_norm_dict()
+        norm_dict = run_prior.default_norm_dict()
         model = build_npe(model_config, pre_transforms=None, norm_dict=norm_dict)
         torch.save({'state_dict': model.state_dict()}, ckpt_dst)
         provenance = {'source': 'random_init'}
@@ -195,9 +196,16 @@ def register_pretrained(config, state: RunState) -> None:
     with open(pre_transforms_config_dst, 'w') as f:
         json.dump(_to_plain_dict(pre_transforms_config), f, indent=2)
 
+    # Pinned here, not re-read from the config each round: the box the
+    # proposal draws from has to stay the one round 0 was trained on.
+    prior_config_dst = round0_dir / 'prior_config.json'
+    with open(prior_config_dst, 'w') as f:
+        json.dump(run_prior.to_dict(), f, indent=2)
+    print(f"[Prior] {run_prior}")
+
     state.register_base(
         ckpt_dst, norm_dict_dst, model_config_dst, pre_transforms_config_dst,
-        **provenance)
+        prior_config_dst, **provenance)
     print(f"[Base] Registered round-0 model -> {round0_dir}")
 
 

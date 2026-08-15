@@ -114,10 +114,11 @@ PROPOSAL_FILES = ('proposal_phys.npy', 'posterior_phys.npy',
                   'diagnostics.json', 'proposal_settings.json')
 
 
-def proposal_settings(config, prev_checkpoint):
+def proposal_settings(config, prev_checkpoint, prior_dict):
     """Everything that determines the proposal, for the resume check."""
     return {
         'proposal': dict(config.proposal),
+        'prior': prior_dict,
         'checkpoint': str(prev_checkpoint),
         'seed': int(config.seed),
         'round': int(config.round),
@@ -203,9 +204,12 @@ def main(config):
     norm_dict = json.loads(state.norm_dict_path().read_text())
     model_config = ConfigDict(json.loads(state.model_config_path().read_text()))
     pre_transforms_config = json.loads(state.pre_transforms_config_path().read_text())
+    run_prior = prior.Prior.from_dict(
+        json.loads(state.prior_config_path().read_text()))
+    print(f'[Prior] {run_prior}')
     prev_checkpoint = state.checkpoint_path(r - 1)
 
-    settings = proposal_settings(config, prev_checkpoint)
+    settings = proposal_settings(config, prev_checkpoint, run_prior.to_dict())
     cached = load_cached_proposal(round_dir, settings)
 
     if cached is not None:
@@ -225,7 +229,7 @@ def main(config):
 
         print('[Proposal] Sampling TSNPE-truncated proposal...')
         proposal_phys, diagnostics, posterior_phys = sample_tsnpe_proposal(
-            model, target, norm_dict, pre_transforms_config,
+            model, run_prior, target, norm_dict, pre_transforms_config,
             return_posterior=True, **config.proposal)
         print(f'  proposal_phys : {proposal_phys.shape}')
         print(f'  diagnostics   : {diagnostics}')
