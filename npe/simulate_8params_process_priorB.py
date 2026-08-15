@@ -40,11 +40,12 @@ agama.setNumThreads(1)
 
 # Parameter space: (alpha, beta, gamma, log_rdm, log_rhos, beta0,
 #                    log_ra, log_rstar)
-# NOTE: rdm is in kpc, rstar is in unit of rdm, ra is in unit of rstar
+# Prior B differs from Prior A in the unit of rdm and rstar
+# NOTE: rdm is in unit of rstar, rstar is in unit of kpc, ra is in unit of rstar
 PRIOR_MIN = np.array(
-    [0.5, 1.0, -1.0, -2.0, 3.0, -0.499, -1.0, -3.0])
+    [0.5, 1.0, -1.0, 0.0, 3.0, -0.499, -1.0, -2.0])
 PRIOR_MAX = np.array(
-    [3.0, 10.0, 2.0, 2.0, 10.0, 1.0, 3.0, 0.0])
+    [3.0, 10.0, 2.0, 3.0, 10.0, 1.0, 3.0, 2.0])
 
 
 def _init_worker(sample_threads: int) -> None:
@@ -76,15 +77,17 @@ def simulator(
     alpha, beta, gamma, log_rdm, log_rhos, beta0, log_ra, log_rstar = (
         params
     )
-    r_dm = 10 ** log_rdm
-    r_star = 10 ** log_rstar * r_dm
+    r_star = 10 ** log_rstar
+    r_dm = 10 ** log_rdm * r_star
     r_a = 10 ** log_ra * r_star
     rho_s = 10 ** log_rhos
     try:
         dm_potential = agama.Potential(
             type='Spheroid', alpha=alpha, beta=beta, gamma=gamma,
             scaleRadius=r_dm, densityNorm=rho_s,
-            outercutoffRadius=max(50, 10 * r_dm))
+            outerCutoffRadius=10 * r_dm,
+            cutoffStrength=2.
+        )
         stellar_density = agama.Density(
             type='Plummer', mass=1, scaleRadius=r_star)
         dist_function = agama.DistributionFunction(
@@ -115,8 +118,7 @@ def preprocess(
     """
     # parse the params and data
     _, _, _, log_rdm, _, _, _, log_rstar = params
-    r_dm = 10 ** log_rdm
-    r_star = 10 ** log_rstar * r_dm
+    r_star = 10 ** log_rstar
 
     num_stars = posvel.shape[0]
     rad3d = np.linalg.norm(posvel[:, :3], axis=1)  # 3D radius
@@ -124,7 +126,7 @@ def preprocess(
     veldisp3d = np.std(vel3d)  # 3D velocity dispersion
 
     # default preprocessing settings
-    min_v, max_v = 0., 1000.
+    min_v, max_v = 0., 200.
     min_vdisp, max_vdisp = 1e-10, 1e10
     min_radius_rstar, max_radius_rstar = 0., 10
     min_radius_kpc, max_radius_kpc = 0., 100
@@ -192,7 +194,8 @@ def save_simdata(
      log_rstar) = np.array(theta_list).T
 
     # unit conversion to kpc
-    log_rstar_kpc = log_rstar + log_rdm
+    log_rdm_kpc = log_rdm + log_rstar
+    log_rstar_kpc = log_rstar
     log_ra_kpc = log_ra + log_rstar_kpc
 
     # store pos and vel in a single array, and store the number of
@@ -207,6 +210,7 @@ def save_simdata(
         f.create_dataset('dm_beta', data=beta)
         f.create_dataset('dm_gamma', data=gamma)
         f.create_dataset('dm_log_rdm', data=log_rdm)
+        f.create_dataset('dm_log_rdm_kpc', data=log_rdm_kpc)
         f.create_dataset('dm_log_rho0', data=log_rhos)
         f.create_dataset('df_beta0', data=beta0)
         f.create_dataset('df_log_ra', data=log_ra)
