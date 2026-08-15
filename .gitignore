@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Run configs are per-experiment and personal: they hard-code scratch
+# paths, wandb run ids and target catalogs, so versioning them just
+# produces merge conflicts between people running different targets.
+# The *_example.py files are the exception - the READMEs point at them
+# as the documented starting point.
+npe/configs/*.py
+tsnpe/configs/*.py
+!npe/configs/*_example.py
+!tsnpe/configs/*_example.py

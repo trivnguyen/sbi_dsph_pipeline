@@ -50,13 +50,12 @@ ALL_PARAM_NAMES = PARAM_NAMES + [CONDITIONING_NAME]
 RADIUS_UNITS = 'kpc'
 
 _PRIOR_BOUNDS = {
-    # priorA / 8p_ZhaoPlumCOM.
-    # NOTE: dm_beta's lower bound is 2.0 here but 1.0 in that dataset's
-    # recorded prior_min, so the proposal never revisits beta < 2 even
-    # though round 0 was trained on it. Unresolved - left as-is rather
-    # than silently widened.
+    # priorA / 8p_ZhaoPlumCOM. dm_beta's lower bound was 2.0 here while
+    # that dataset's recorded prior_min has 1.0, so the proposal could
+    # never revisit beta < 2 even though round 0 was trained on it;
+    # widened to 1.0 to match the training set.
     'kpc': (
-        np.array([0.5, 2.0, -1.0, 0.0, 3.0, -0.499, -1.0]),
+        np.array([0.5, 1.0, -1.0, 0.0, 3.0, -0.499, -1.0]),
         np.array([3.0, 10.0, 2.0, 3.0, 10.0, 1.0, 3.0]),
     ),
     # priorB / 8p_ZhaoPlumCOM_v3, i.e. that set's config.0.json with the

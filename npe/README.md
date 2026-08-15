@@ -7,17 +7,23 @@ it for `tsnpe/` to fine-tune against a real target.
 ## Layout
 
 ```
-simulate_8params_process.py   simulate training data (ProcessPoolExecutor;
+simulate_8params_process_priorA.py
+                              simulate training data (ProcessPoolExecutor;
                                each worker has its own isolated agama
                                state, so no locking needed - prefer this
-                               one)
+                               one). priorA: r_dm in kpc, r_star in units
+                               of r_dm, r_a in units of r_star
+simulate_8params_process_priorB.py
+                              same, with r_dm and r_a both in units of
+                               r_star and r_star in kpc - the
+                               parameterization tsnpe's RADIUS_UNITS
+                               ='rstar' expects
 simulate_8params_thread.py    same simulation, ThreadPoolExecutor version
                                (needs a lock around agama's RNG-touching
                                .sample() call - kept for comparison)
 train_npe.py                  train the model
-configs/
-  chebconv_8params.py         3D Cartesian pos/vel + vel_error features
-  chebconv_8params_pm.py      adds proper motions (7D input)
+configs/                      per-run configs (git-ignored; copy an
+                               existing one as a starting point)
 slurm/
   submit.sh                   submit train_npe.py to SLURM with per-run
                                log bookkeeping
@@ -28,12 +34,12 @@ slurm/
 ## Simulate training data
 
 ```bash
-python simulate_8params_process.py \
+python simulate_8params_process_priorA.py \
     --n-sims 100000 --n-workers 24 --output-dir /scratch/$USER/datasets/8p_ZhaoPlumCOM
 ```
 
-Draws from a fixed wide prior (`PRIOR_MIN`/`PRIOR_MAX` in
-`simulate_8params_process.py`) and simulates each galaxy's 6D stellar
+Draws from a fixed wide prior (`PRIOR_MIN`/`PRIOR_MAX` at the top of
+the script) and simulates each galaxy's 6D stellar
 kinematics with Agama, writing Cartesian pos/vel/vel_error to sharded
 HDF5 files (`--galaxies-per-file`). `--append` resumes into an existing
 output directory instead of overwriting it.
@@ -41,7 +47,7 @@ output directory instead of overwriting it.
 ## Train
 
 ```bash
-python train_npe.py --config configs/chebconv_8params.py
+python train_npe.py --config configs/my_run.py
 ```
 
 Config fields worth knowing:
@@ -66,9 +72,9 @@ On resume, the checkpoint's own recorded `norm_dict` is always reused
 ### On SLURM
 
 ```bash
-./slurm/submit.sh configs/chebconv_8params.py
-./slurm/submit.sh configs/chebconv_8params.py --time=1-00:00:00 --partition=compute_h200
-./slurm/submit.sh configs/chebconv_8params.py --config.train_batch_size=128
+./slurm/submit.sh configs/my_run.py
+./slurm/submit.sh configs/my_run.py --time=1-00:00:00 --partition=compute_h200
+./slurm/submit.sh configs/my_run.py --config.train_batch_size=128
 ```
 
 Each submission gets its own log directory under
