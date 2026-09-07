@@ -7,17 +7,34 @@ copied to any machine, pip-installed from its requirements.txt (or
 built with its Dockerfile), and launched with no access to this repo,
 the cluster filesystem, or the network:
 
-    python package.py --checkpoint-dir /path/to/checkpoints
+    python package.py --model 8p_priorA --model 8p_v3
     cd dist/dsph_explorer
     pip install -r requirements.txt
     python app.py
 
+Bundle as many models as you want to hand over: they land in
+`models/<name>/`, and the bundled app offers them in a dropdown exactly
+as the repo-mode server does. A checkpoint is ~11 MB, so a second one
+is cheap next to the ~50 MB of vendored packages.
+
+A model's radius convention is the one thing about a checkpoint that no
+file in it records (see inference.build_prior). `--model` takes it from
+`npe_inference/configs/models.py`, where it is declared once; a
+checkpoint given by `--checkpoint-dir` is registered nowhere, so
+`--radius-units` must assert it. Either way it is written into
+`models/<name>/model_spec.json` and read back at launch, so the bundle
+never asks its users.
+
 Usage:
-    python package.py --checkpoint-dir DIR [--checkpoint-filename F]
-                      [--out DIR]
+    python package.py --model NAME [--model NAME ...] [--out DIR]
+    python package.py --checkpoint-dir DIR --radius-units {kpc,rstar}
+                      [--name N] [--checkpoint-filename F]
+                      [--note TEXT] [--out DIR]
 """
 
 import argparse
+import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -25,9 +42,16 @@ from pathlib import Path
 import numpy as np
 
 _WEBAPP_DIR = Path(__file__).resolve().parent
-_REPO_TSNPE = _WEBAPP_DIR.parent / 'tsnpe' / 'tsnpe'
 
-_APP_FILES = ('app.py', 'inference.py', 'user_catalog.py')
+# The `tsnpe` package to vendor comes from the checkout this file
+# sits in, overridable exactly as in app_paths.py and
+# npe_inference/npe_infer/paths.py.
+_PIPELINE_DIR = Path(os.environ.get(
+    'SBI_DSPH_PIPELINE_DIR', str(_WEBAPP_DIR.parent)))
+_REPO_TSNPE = _PIPELINE_DIR / 'tsnpe' / 'tsnpe'
+
+_APP_FILES = ('app.py', 'app_paths.py', 'inference.py',
+              'user_catalog.py')
 _TSNPE_MODULES = ('__init__.py', 'target.py', 'prior.py',
                   'model_io.py', 'proposal.py')
 
@@ -102,9 +126,12 @@ interactive profile explorer (density, enclosed mass, anisotropy, LOS
 dispersion, LOS kurtosis), the posterior corner plot, a Wolf-mass
 sanity check, and the raw posterior samples as CSV.
 
-Everything is local to this directory: the app, the trained model
-(`model/`), and private copies of the analysis packages it needs. No
+Everything is local to this directory: the app, the trained models
+(`models/`), and private copies of the analysis packages it needs. No
 repository access or network access is required at runtime.
+
+If more than one model is bundled, pick between them in the dropdown
+at the top of step 3; posterior output is in kpc whichever you pick.
 
 ## Run
 
@@ -218,12 +245,27 @@ always overridable: edit the key and click Prefill, or just edit the
 fields. A file spanning several known systems isn't auto-picked; use
 the row filter to choose one.
 
-## Swapping in another model
+## Adding or swapping a model
 
-Replace the contents of `model/` with any checkpoint trained by this
-pipeline: the Lightning `.ckpt` plus the `config_snapshot.json`
-written next to it at training time. If the directory holds exactly
-one `.ckpt`, any file name works.
+Each subdirectory of `models/` is one entry in the dropdown, named
+after the directory. Add another by copying in any checkpoint trained
+by this pipeline - the Lightning `.ckpt` plus the
+`config_snapshot.json` written next to it at training time (if the
+directory holds exactly one `.ckpt`, any file name works) - and
+writing a `model_spec.json` beside it:
+
+```json
+{"radius_units": "rstar", "note": "priorB / 2M sims"}
+```
+
+`radius_units` says which convention that model predicts radii in:
+`"kpc"` for a priorA model (8p_ZhaoPlumCOM) or `"rstar"` for a priorB
+one (8p_ZhaoPlumCOM_v3). Nothing in a checkpoint records this, and the
+wrong value shifts the DM scale radius by a factor of the half-light
+radius while still producing plausible-looking profiles, so the app
+refuses to start a model without it. It is per-model and not a
+user-facing setting: whichever model runs, its output is converted to
+kpc before you see it.
 
 ## Deploying on a website
 
@@ -323,19 +365,71 @@ def _copy_tree(src: Path, dst: Path) -> None:
             '__pycache__', '*.pyc', '.git', '.git*', '*.ipynb'))
 
 
-def build(checkpoint_dir: Path, checkpoint_filename: str,
-          out: Path) -> None:
-    """Assemble the bundle at `out` (replacing any previous build)."""
-    sys.path.insert(0, str(_WEBAPP_DIR))
-    import inference  # noqa: E402 - needs webapp dir on sys.path
+def _copy_model(spec: dict, out: Path, inference) -> None:
+    """Copy one model into `out/models/<name>/` with its spec file.
 
-    checkpoint_path = checkpoint_dir / checkpoint_filename
+    Args:
+        spec: `{name, model_dir, checkpoint, radius_units, note}`.
+        out: The bundle directory.
+        inference: The webapp's inference module (imported by build,
+            which puts the webapp directory on sys.path first).
+
+    Raises:
+        FileNotFoundError: If the checkpoint or its config snapshot is
+            missing.
+    """
+    checkpoint_path = spec['model_dir'] / spec['checkpoint']
     if not checkpoint_path.exists():
         raise FileNotFoundError(f'No checkpoint at {checkpoint_path}')
     snapshot = inference._find_config_snapshot(checkpoint_path)
     if snapshot is None:
         raise FileNotFoundError(
             f'No config_snapshot.json found near {checkpoint_path}')
+
+    model_dir = out / 'models' / spec['name']
+    model_dir.mkdir(parents=True)
+    shutil.copy(checkpoint_path, model_dir / 'model.ckpt')
+    shutil.copy(snapshot, model_dir / 'config_snapshot.json')
+    # What the checkpoint cannot say about itself. app.py reads this
+    # instead of requiring --radius-units from the bundle's users.
+    (model_dir / 'model_spec.json').write_text(json.dumps({
+        'name': spec['name'],
+        'radius_units': spec['radius_units'],
+        'source_checkpoint': str(checkpoint_path),
+        'note': spec['note'],
+    }, indent=2) + '\n')
+    print(f'  models/{spec["name"]}  ({spec["radius_units"]})  '
+          f'{checkpoint_path}')
+
+
+def build(specs: list[dict], out: Path) -> None:
+    """Assemble the bundle at `out` (replacing any previous build).
+
+    Args:
+        specs: One `{name, model_dir, checkpoint, radius_units, note}`
+            per model to ship, in the order the bundle's dropdown will
+            show them. `radius_units` is asserted here and nowhere
+            else in the bundle, since no file in a checkpoint says.
+        out: Bundle directory, replaced if it exists.
+
+    Raises:
+        FileNotFoundError: If a checkpoint or its config snapshot is
+            missing.
+        ValueError: If a `radius_units` is not recognized, or two
+            models share a name.
+    """
+    sys.path.insert(0, str(_WEBAPP_DIR))
+    import inference  # noqa: E402 - needs webapp dir on sys.path
+
+    # Fail before copying 60 MB, and reuse the one definition of what a
+    # valid convention is rather than restating the choices here.
+    for spec in specs:
+        inference.build_prior(spec['radius_units'])
+    names = [spec['name'] for spec in specs]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            f'Duplicate model names {names} - each becomes a directory '
+            'under models/ and a dropdown entry, so they must differ.')
 
     if out.exists():
         shutil.rmtree(out)
@@ -346,11 +440,9 @@ def build(checkpoint_dir: Path, checkpoint_filename: str,
         shutil.copy(_WEBAPP_DIR / name, out / name)
     _copy_tree(_WEBAPP_DIR / 'static', out / 'static')
 
-    # The model.
-    model_dir = out / 'model'
-    model_dir.mkdir()
-    shutil.copy(checkpoint_path, model_dir / 'model.ckpt')
-    shutil.copy(snapshot, model_dir / 'config_snapshot.json')
+    # The models.
+    for spec in specs:
+        _copy_model(spec, out, inference)
 
     # Vendored packages. jgnn/dsph_analysis are located via import so
     # the script works regardless of how they're installed.
@@ -380,15 +472,58 @@ def build(checkpoint_dir: Path, checkpoint_filename: str,
         f.stat().st_size for f in out.rglob('*') if f.is_file()
     ) / 1e6
     print(f'Bundle built at {out} ({size_mb:.0f} MB)')
-
-    # Also (re)build the distributable tarball next to the bundle dir,
-    # so `dist/<name>.tar.gz` is never stale relative to the source.
-    archive = shutil.make_archive(
-        base_name=str(out), format='gztar',
-        root_dir=str(out.parent), base_dir=out.name)
-    tar_mb = Path(archive).stat().st_size / 1e6
-    print(f'Tarball written to {archive} ({tar_mb:.0f} MB)')
     print('Try it:  cd', out, '&& python app.py')
+
+
+def _specs_from_args(args) -> list[dict]:
+    """Turn the command line into one spec per model to ship.
+
+    `--model` reads the registry, which is where a model's radius
+    convention is declared; `--checkpoint-dir` names a checkpoint the
+    registry does not describe, so `--radius-units` has to.
+
+    Args:
+        args: Parsed command line.
+
+    Returns:
+        Specs in the order the bundle's dropdown will show them.
+
+    Raises:
+        SystemExit: If the flags are inconsistent, or `--model` names
+            something the registry does not have.
+    """
+    if bool(args.model) == bool(args.checkpoint_dir):
+        raise SystemExit(
+            'Pass either --model NAME (repeatable, from '
+            'npe_inference/configs/models.py) or --checkpoint-dir with '
+            '--radius-units, not both and not neither.')
+
+    if args.checkpoint_dir:
+        if not args.radius_units:
+            raise SystemExit(
+                '--checkpoint-dir needs --radius-units: no file in a '
+                'checkpoint records which convention it was trained '
+                'under, and the wrong value silently shifts '
+                'dm_log_rdm by a factor of r_star.')
+        checkpoint_dir = Path(args.checkpoint_dir)
+        default_name = (checkpoint_dir.parent.parent.name
+                        if checkpoint_dir.name == 'checkpoints'
+                        else checkpoint_dir.name)
+        return [dict(
+            name=args.name or default_name, model_dir=checkpoint_dir,
+            checkpoint=args.checkpoint_filename,
+            radius_units=args.radius_units, note=args.note)]
+
+    sys.path.insert(0, str(_WEBAPP_DIR))
+    import app_paths  # noqa: E402 - needs webapp dir on sys.path
+    registry = app_paths.load_registry()
+    unknown = [m for m in args.model if m not in registry]
+    if unknown:
+        raise SystemExit(
+            f'--model {", ".join(unknown)}: not registered (or the '
+            f'checkpoint is missing from {app_paths.MODEL_WORKDIR}). '
+            f'Available: {", ".join(registry) or "none"}.')
+    return [registry[m] for m in args.model]
 
 
 def main() -> None:
@@ -396,17 +531,42 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        '--checkpoint-dir', required=True,
-        help='Directory holding the trained checkpoint, with '
-             'config_snapshot.json alongside or a few parents up.')
+        '--model', action='append', default=[], metavar='NAME',
+        help='A registered model to ship, by its name in '
+             'npe_inference/configs/models.py (8p_priorA, 8p_v3, '
+             '8p_v3_5M). Repeatable; the first is what the bundled app '
+             'selects by default. Takes each model\'s radius '
+             'convention from the registry, so --radius-units is not '
+             'needed.')
+    parser.add_argument(
+        '--checkpoint-dir', default=None,
+        help='Ship one checkpoint the registry does not list, by path '
+             'to the directory holding it (with config_snapshot.json '
+             'alongside or a few parents up). Requires '
+             '--radius-units.')
     parser.add_argument('--checkpoint-filename', default='last.ckpt')
+    parser.add_argument(
+        '--radius-units', default=None, choices=('kpc', 'rstar'),
+        help="The --checkpoint-dir checkpoint's radius convention: "
+             "'kpc' for priorA (8p_ZhaoPlumCOM) or 'rstar' for priorB "
+             '(8p_ZhaoPlumCOM_v3, 8p_ZhaoPlumCOM_v3_5M). Required with '
+             '--checkpoint-dir and not guessed: nothing in the '
+             'checkpoint records it, and the wrong value silently '
+             'shifts dm_log_rdm by a factor of r_star.')
+    parser.add_argument(
+        '--name', default=None,
+        help='Name for the --checkpoint-dir model in the bundle\'s '
+             'dropdown (default: its project directory name).')
+    parser.add_argument(
+        '--note', default='',
+        help='Free text describing the --checkpoint-dir model, shown '
+             'beneath the bundled app\'s model selector.')
     parser.add_argument(
         '--out', default=str(_WEBAPP_DIR / 'dist' / 'dsph_explorer'),
         help='Output bundle directory (default: webapp/dist/'
              'dsph_explorer).')
     args = parser.parse_args()
-    build(Path(args.checkpoint_dir), args.checkpoint_filename,
-          Path(args.out))
+    build(_specs_from_args(args), Path(args.out))
 
 
 if __name__ == '__main__':

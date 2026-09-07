@@ -8,19 +8,34 @@ fill in the system metadata (half-light radius is required - the model
 conditions on it), and get an interactive profile explorer, the
 posterior corner plot, and the raw posterior samples back.
 
-One pretrained NPE model directory (a Lightning .ckpt plus the
+Every model the server offers (a Lightning .ckpt plus the
 config_snapshot.json written by npe/train_npe.py) is loaded once at
-startup and shared by every request; runs are serialized behind a lock
-since they share one device.
+startup and held in memory; the UI picks between them per run, the
+same way it picks a catalog. Checkpoints are ~11 MB, so holding all of
+them costs nothing. Runs are serialized behind a lock since they share
+one device.
 
-Run (the packaged bundle defaults to its own ./model directory):
-    python app.py [--model-dir /path/to/model] [--port 8799]
+A model's radius-unit convention is *not* recorded in its checkpoint or
+its training config snapshot, and cannot be inferred from either, so it
+is never a free-standing runtime choice: it travels with the model it
+belongs to, declared once in npe_inference/configs/models.py (repo
+mode) or in models/<name>/model_spec.json (a bundle, written by
+package.py).
+--radius-units exists only for a checkpoint given by path, which no
+registry describes.
+
+Run - in the repo, every registered model whose checkpoint is present:
+    python app.py [--model 8p_priorA --model 8p_v3] [--port 8799]
+
+Run - one checkpoint by path, or the packaged bundle's ./model:
+    python app.py --model-dir /path/to/model [--radius-units kpc]
 
 then open http://<server>:8799 (or SSH-tunnel the port). See README.md.
 """
 
 import argparse
 import base64
+import json
 import os
 import sys
 import threading
@@ -53,6 +68,7 @@ from fastapi.staticfiles import StaticFiles
 _APP_DIR = Path(__file__).resolve().parent
 if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
+import app_paths
 import inference
 import user_catalog
 
@@ -63,8 +79,9 @@ app = FastAPI(title='dSph posterior explorer')
 app.mount('/static', StaticFiles(directory=_APP_DIR / 'static'),
           name='static')
 
-# Filled by main() before uvicorn starts: model, norm_dict,
-# pre_transforms_config, device, model_dir, output_dir, n_workers.
+# Filled by main() before uvicorn starts: models (name -> a loaded
+# entry, see _load_entry), default_model, device, output_dir,
+# n_workers.
 STATE = {}
 
 # One inference at a time (shared device); concurrent requests queue.
@@ -107,19 +124,36 @@ def _opt_float(value) -> float:
     return float(value)
 
 
-def _summary(label: str, info: dict, posterior: np.ndarray) -> dict:
+def _summary(
+    label: str, info: dict, posterior_kpc: np.ndarray, entry: dict,
+) -> dict:
     """JSON-friendly run summary: selection info plus 16/50/84
     posterior percentiles per parameter.
+
+    Args:
+        label: Display name for the run.
+        info: Selection info from user_catalog.build_target.
+        posterior_kpc: Draws with every radius column in log10(r/kpc),
+            i.e. inference.to_physical_kpc output. `unit` marks which
+            columns those are, so the UI can say so.
+        entry: The model entry this run used. Reported back because
+            results stay on screen while the model selector moves, so
+            the table has to say which model it is showing.
     """
-    q = np.percentile(posterior, [16, 50, 84], axis=0)
+    q = np.percentile(posterior_kpc, [16, 50, 84], axis=0)
     params = [
         dict(name=name, median=float(q[1, i]),
              minus=float(q[1, i] - q[0, i]),
-             plus=float(q[2, i] - q[1, i]))
+             plus=float(q[2, i] - q[1, i]),
+             unit=('log10(r/kpc)'
+                   if i in inference.RADIUS_PARAM_INDICES
+                   or i == inference.I_COND else ''))
         for i, name in enumerate(prior.ALL_PARAM_NAMES)
     ]
     return dict(label=label, info=info, params=params,
-                n_posterior_samples=int(len(posterior)))
+                model=entry['name'],
+                model_radius_units=entry['radius_units'],
+                n_posterior_samples=int(len(posterior_kpc)))
 
 
 @app.get('/')
@@ -127,13 +161,39 @@ def index():
     return FileResponse(_APP_DIR / 'static' / 'index.html')
 
 
+def _entry_public(entry: dict) -> dict:
+    """The part of a model entry the frontend may see (no tensors)."""
+    return dict(
+        name=entry['name'], radius_units=entry['radius_units'],
+        note=entry['note'],
+        model_dir=str(entry['model_dir'] / entry['checkpoint']))
+
+
 @app.get('/api/config')
 def get_config():
-    """Static server-side facts the UI shows at load time."""
+    """Server-side facts the UI shows at load time, including every
+    model it may choose between.
+    """
     return dict(
-        model=str(STATE['model_dir']),
         device=str(STATE['device']),
+        default_model=STATE['default_model'],
+        models=[_entry_public(e) for e in STATE['models'].values()],
     )
+
+
+@app.get('/api/models')
+def list_models():
+    """The loaded models, for the run-time model selector.
+
+    `radius_units` is reported per model and is not separately
+    selectable: it describes how a given flow's radius outputs are
+    scaled, so pairing it with a different checkpoint would silently
+    shift dm_log_rdm by a factor of r_star. Output is always kpc
+    whichever model runs - see inference.to_physical_kpc.
+    """
+    return dict(
+        default=STATE['default_model'],
+        models=[_entry_public(e) for e in STATE['models'].values()])
 
 
 @app.get('/api/systems')
@@ -268,6 +328,23 @@ def run(payload: dict):
         raise HTTPException(
             status_code=400,
             detail='rhalf_kpc is required - the model conditions on it.')
+    # The conditioning prior is a window n_sigma wide around the
+    # measured r_half, so a zero uncertainty makes it a single point
+    # and prior.in_prior_box cuts essentially every draw. The failure
+    # surfaces deep inside sample_posterior as "all posterior samples
+    # fell outside the prior box", which reads like a model problem,
+    # so catch it here where the cause is still visible.
+    if (_opt_float(payload.get('rhalf_kpc_em')) or 0.0) <= 0 and \
+            (_opt_float(payload.get('rhalf_kpc_ep')) or 0.0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail='R_half needs a non-zero uncertainty: the model '
+                   'conditions on a window around it, and a window of '
+                   'zero width contains no posterior draws. Give at '
+                   'least one of the -err / +err values (they are '
+                   'prefilled with the published values for a known '
+                   'system).')
+    entry = _select_model(payload.get('model'))
 
     label = str(payload.get('label') or 'user_catalog').strip()
     try:
@@ -307,17 +384,24 @@ def run(payload: dict):
             n_samples = int(payload.get('n_samples') or 1000)
             n_bins = int(payload.get('n_bins') or 4)
             t_sample = time.perf_counter()
-            posterior = inference.sample_posterior(
-                STATE['model'], target, STATE['norm_dict'],
-                STATE['pre_transforms_config'],
+            # sample_posterior returns draws in the model's own radius
+            # units and cuts them against the prior box in that space;
+            # everything below this point wants kpc.
+            posterior_model_units = inference.sample_posterior(
+                entry['model'], entry['prior'], target,
+                entry['norm_dict'], entry['pre_transforms_config'],
                 n_samples=n_samples, n_mc_conditioning=n_samples,
                 conditioning_dist='gaussian', return_log_prob=False,
                 batch_size=int(payload.get('batch_size') or 512))
             sampling_sec = time.perf_counter() - t_sample
+            posterior = inference.to_physical_kpc(
+                posterior_model_units, entry['radius_units'])
 
             # Optional rejection cut on the inner slope gamma. We keep
             # the requested sample count fixed and just drop the draws
-            # outside the range, reporting how many survive.
+            # outside the range, reporting how many survive. gamma is
+            # dimensionless, so the kpc conversion above leaves it
+            # alone and the cut means the same thing on either side.
             n_requested = len(posterior)
             gamma_min = _opt_float(payload.get('gamma_min'))
             gamma_max = _opt_float(payload.get('gamma_max'))
@@ -353,9 +437,12 @@ def run(payload: dict):
 
             job_id = uuid.uuid4().hex
             corner_path = STATE['output_dir'] / f'{job_id}_corner.png'
-            inference.plot_corner(posterior, corner_path, label)
+            inference.plot_corner(
+                posterior, corner_path,
+                _corner_title(dict(label=label, model=entry['name'])))
             _remember(_RESULTS, job_id,
-                      dict(label=label, posterior=posterior))
+                      dict(label=label, posterior=posterior,
+                           model=entry['name']))
             profiles = inference.profiles_payload(
                 inference.R_VEC_KPC, jeans, vdisp_profile,
                 vkurtosis_profile, wolf)
@@ -364,11 +451,24 @@ def run(payload: dict):
         raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        # sample_posterior raises this when every draw falls outside
+        # the prior box. With a valid catalog that almost always means
+        # the server was launched with the wrong --radius-units, so say
+        # so rather than showing a bare traceback.
+        raise HTTPException(
+            status_code=500,
+            detail=f'{e}\n\nModel {entry["name"]} is registered as '
+                   f'radius_units={entry["radius_units"]}. If it was '
+                   f'in fact trained under the other convention, every '
+                   f'draw lands outside the prior box exactly like '
+                   f'this - check its entry in '
+                   f'npe_inference/configs/models.py.')
     except Exception:
         raise HTTPException(status_code=500,
                             detail=traceback.format_exc())
 
-    summary = _summary(label, info, posterior)
+    summary = _summary(label, info, posterior, entry)
     summary.update(n_posterior_requested=n_requested,
                    gamma_min=gamma_min, gamma_max=gamma_max,
                    walltime_sec=round(walltime_sec, 2),
@@ -381,11 +481,36 @@ def run(payload: dict):
     )
 
 
+@app.get('/api/posterior/{job_id}')
+def download_posterior(job_id: str):
+    """The run's posterior samples as CSV, one column per parameter.
+
+    Radii are log10(r / kpc) - the `_kpc` suffixes are the difference
+    between these columns and the model's own output, which holds
+    df_log_ra (and, for priorB models, dm_log_rdm) in r_star units.
+    """
+    if job_id not in _RESULTS:
+        raise HTTPException(
+            status_code=404,
+            detail='Unknown or expired job_id - run inference again.')
+    c = _RESULTS[job_id]
+    csv = pd.DataFrame(
+        c['posterior'],
+        columns=inference.KPC_PARAM_NAMES).to_csv(index=False)
+    safe = c['label'].replace(' ', '_').replace('/', '_')
+    return PlainTextResponse(csv, media_type='text/csv', headers={
+        'Content-Disposition':
+            f'attachment; filename="{safe}_posterior.csv"'})
+
+
 @app.post('/api/corner/{job_id}')
 def regenerate_corner(job_id: str, options: dict):
     """Re-render the corner PNG for a finished run with new styling
     (smoothing, bin count, contour style, data points) from the stored
     posterior - no re-inference needed.
+
+    The stored samples are already in kpc, so this re-renders exactly
+    what the run produced; only the styling changes.
     """
     if job_id not in _RESULTS:
         raise HTTPException(
@@ -401,30 +526,40 @@ def regenerate_corner(job_id: str, options: dict):
     corner_path = STATE['output_dir'] / f'{job_id}_corner.png'
     try:
         inference.plot_corner(
-            c['posterior'], corner_path, c['label'], options=opts)
+            c['posterior'], corner_path, _corner_title(c), options=opts)
     except Exception:
         raise HTTPException(status_code=500,
                             detail=traceback.format_exc())
     return dict(corner_png=_b64_png(corner_path))
 
 
-@app.get('/api/posterior/{job_id}')
-def download_posterior(job_id: str):
-    """The run's raw posterior samples as CSV (physical units, one
-    column per parameter).
+def _corner_title(cached: dict) -> str:
+    """Corner-plot title for a cached run: the label plus the model
+    that produced it, since a server offers several.
     """
-    if job_id not in _RESULTS:
+    return f'{cached["label"]} / {cached["model"]}'
+
+
+def _select_model(name) -> dict:
+    """The loaded model entry a request asked for.
+
+    Args:
+        name: Model name from the request payload, or None/'' to take
+            the server's default.
+
+    Returns:
+        The entry, as built by _load_entry.
+
+    Raises:
+        HTTPException: If `name` is not one this server loaded.
+    """
+    key = str(name or '').strip() or STATE['default_model']
+    if key not in STATE['models']:
         raise HTTPException(
-            status_code=404,
-            detail='Unknown or expired job_id - run inference again.')
-    c = _RESULTS[job_id]
-    csv = pd.DataFrame(
-        c['posterior'],
-        columns=prior.ALL_PARAM_NAMES).to_csv(index=False)
-    safe = c['label'].replace(' ', '_').replace('/', '_')
-    return PlainTextResponse(csv, media_type='text/csv', headers={
-        'Content-Disposition':
-            f'attachment; filename="{safe}_posterior.csv"'})
+            status_code=400,
+            detail=f'Unknown model {key!r}. This server loaded: '
+                   f'{", ".join(STATE["models"])}.')
+    return STATE['models'][key]
 
 
 def _resolve_checkpoint_filename(model_dir: Path, filename: str) -> str:
@@ -441,15 +576,220 @@ def _resolve_checkpoint_filename(model_dir: Path, filename: str) -> str:
         'candidates - pass --checkpoint-filename explicitly.')
 
 
+MODEL_SPEC_FILENAME = 'model_spec.json'
+
+
+def _load_model_spec(model_dir: Path) -> dict:
+    """Read `model_spec.json` from a model directory, if it has one.
+
+    package.py writes this file into the bundle so a bundle user never
+    has to know the model's radius convention. A model directory
+    pointed at directly in the repo normally has no such file, and the
+    setting comes from --radius-units instead.
+
+    Args:
+        model_dir: Directory holding the checkpoint.
+
+    Returns:
+        The parsed spec, or an empty dict if the file is absent.
+
+    Raises:
+        ValueError: If the file exists but is not valid JSON.
+    """
+    path = model_dir / MODEL_SPEC_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f'{path} is not valid JSON: {e}')
+
+
+def _resolve_radius_units(cli_value, spec: dict, model_dir: Path) -> str:
+    """Settle a by-path model's radius convention, or fail loudly.
+
+    There is deliberately no default. The convention is not recorded in
+    the checkpoint or in the training config snapshot, and guessing it
+    from a directory name would silently shift `dm_log_rdm` by a factor
+    of r_star - numbers that look entirely plausible. npe_inference's
+    configs/models.py takes the same position: registering a model is a
+    deliberate act, and an unregistered one is an error.
+
+    Only reached for --model-dir. Registered models carry the value in
+    that same configs/models.py, and a bundle carries it in its
+    model_spec.json, so neither path asks the user anything.
+
+    Args:
+        cli_value: --radius-units, or None.
+        spec: Parsed model_spec.json (may be empty).
+        model_dir: Model directory, for the error message.
+
+    Returns:
+        'kpc' or 'rstar'.
+
+    Raises:
+        SystemExit: If neither source supplies a value.
+        ValueError: If the value is not a recognized convention.
+    """
+    units = cli_value or spec.get('radius_units')
+    if units is None:
+        raise SystemExit(
+            f'No radius convention for {model_dir}: it has no '
+            f'{MODEL_SPEC_FILENAME} and --radius-units was not given.\n'
+            'A checkpoint does not record which convention it was '
+            'trained under, and guessing wrong silently shifts '
+            'dm_log_rdm by a factor of r_star, so this is not '
+            'defaulted. Either drop --model-dir and name a registered '
+            'model with --model, or say which this one is. Registered '
+            'models (npe_inference/configs/models.py):\n'
+            '  8p_priorA  8p_ZhaoPlumCOM        --radius-units kpc\n'
+            '  8p_v3      8p_ZhaoPlumCOM_v3     --radius-units rstar\n'
+            '  8p_v3_5M   8p_ZhaoPlumCOM_v3_5M  --radius-units rstar')
+    if units not in prior.RADIUS_UNITS_CHOICES:
+        raise ValueError(
+            f'radius_units={units!r} not recognized; must be one of '
+            f'{prior.RADIUS_UNITS_CHOICES}')
+    return units
+
+
+def _load_entry(spec: dict, device) -> dict:
+    """Load one model into a ready-to-run STATE['models'] entry.
+
+    Args:
+        spec: `{name, model_dir, checkpoint, radius_units, note}`, from
+            app_paths.load_registry or built by _build_specs.
+        device: torch device to put the flow on.
+
+    Returns:
+        `spec` plus the loaded `model`, its `norm_dict` and
+        `pre_transforms_config`, and the `prior` whose box
+        `sample_posterior` cuts draws against - which is why the prior
+        is per-model rather than global: its radius columns are
+        interpreted in that model's own units.
+    """
+    print(f'[Model] {spec["name"]}: loading '
+          f'{spec["model_dir"] / spec["checkpoint"]} on {device}...')
+    model, norm_dict, pre_transforms_config = inference.load_model(
+        str(spec['model_dir']), spec['checkpoint'], device)
+    entry = dict(spec)
+    entry.update(
+        model=model, norm_dict=norm_dict,
+        pre_transforms_config=pre_transforms_config,
+        prior=inference.build_prior(
+            spec['radius_units'], prior_min=spec.get('prior_min'),
+            prior_max=spec.get('prior_max')))
+    print(f'[Model] {spec["name"]}: {entry["prior"]}')
+    if spec.get('note'):
+        print(f'[Model] {spec["name"]}: {spec["note"]}')
+    return entry
+
+
+def _spec_from_dir(model_dir: Path, args) -> dict:
+    """One unloaded spec for a checkpoint directory given by path.
+
+    Args:
+        model_dir: Directory holding the .ckpt, its
+            config_snapshot.json, and optionally a model_spec.json.
+        args: Parsed command line, for --checkpoint-filename and the
+            --radius-units fallback.
+
+    Returns:
+        `{name, model_dir, checkpoint, radius_units, note, ...}`.
+    """
+    spec = _load_model_spec(model_dir)
+    return dict(
+        spec,
+        name=spec.get('name') or model_dir.name,
+        model_dir=model_dir,
+        checkpoint=_resolve_checkpoint_filename(
+            model_dir, args.checkpoint_filename),
+        radius_units=_resolve_radius_units(
+            args.radius_units, spec, model_dir),
+        note=spec.get('note', ''))
+
+
+def _build_specs(args) -> list[dict]:
+    """Decide which models this server will offer, before loading any.
+
+    Four mutually exclusive sources, most explicit first:
+
+    1. `--model-dir`: exactly that checkpoint. Nothing describes it, so
+       its convention comes from a `model_spec.json` beside it or from
+       `--radius-units`.
+    2. A bundle's `./models/<name>/`, one subdirectory per model, each
+       with its own `model_spec.json`. This is what package.py writes.
+    3. A bundle's `./model`, the single-model layout package.py wrote
+       before `models/` existed. Kept so an old bundle still runs.
+    4. The registry (`app_paths.load_registry`), optionally narrowed to
+       the names given by `--model`. The repo default.
+
+    Args:
+        args: Parsed command line.
+
+    Returns:
+        Unloaded specs in menu order, the first being the default.
+
+    Raises:
+        SystemExit: If no model can be found, or if `--model` names one
+            that is not registered.
+    """
+    if args.model_dir is not None:
+        return [_spec_from_dir(Path(args.model_dir), args)]
+
+    bundled = sorted(d for d in (_APP_DIR / 'models').glob('*')
+                     if d.is_dir())
+    if bundled:
+        return [_spec_from_dir(d, args) for d in bundled]
+    if (_APP_DIR / 'model').is_dir():
+        return [_spec_from_dir(_APP_DIR / 'model', args)]
+
+    registry = app_paths.load_registry()
+    if not registry:
+        raise SystemExit(
+            'No models to serve: no ./models or ./model directory next '
+            'to app.py, no --model-dir, and no usable registry at '
+            f'{app_paths.NPE_INFERENCE_DIR}/configs/models.py with '
+            f'checkpoints under {app_paths.MODEL_WORKDIR}. Point '
+            'NPE_INFERENCE_DIR / NPE_MODEL_WORKDIR at them, or pass '
+            '--model-dir with --radius-units.')
+    if args.model:
+        unknown = [m for m in args.model if m not in registry]
+        if unknown:
+            raise SystemExit(
+                f'--model {", ".join(unknown)}: not registered (or the '
+                f'checkpoint is missing from {app_paths.MODEL_WORKDIR}). '
+                f'Available: {", ".join(registry)}.')
+        return [registry[m] for m in args.model]
+    return list(registry.values())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        '--model-dir', default=str(_APP_DIR / 'model'),
-        help='Directory with the pretrained checkpoint (.ckpt) and its '
-             'config_snapshot.json (default: ./model next to app.py).')
+        '--model', action='append', default=[], metavar='NAME',
+        help='A registered model to offer, by its name in '
+             'npe_inference/configs/models.py (8p_priorA, 8p_v3, '
+             '8p_v3_5M). Repeatable; the first is the default '
+             'selection. Omit to offer every registered model whose '
+             'checkpoint is present.')
+    parser.add_argument(
+        '--model-dir', default=None,
+        help='Serve exactly one checkpoint, by path to the directory '
+             'holding the .ckpt and its config_snapshot.json. Bypasses '
+             'the registry; needs --radius-units unless the directory '
+             f'has a {MODEL_SPEC_FILENAME}. Omit it in a bundle, which '
+             'is served from its own ./models directory.')
     parser.add_argument('--checkpoint-filename', default='model.ckpt')
+    parser.add_argument(
+        '--radius-units', choices=list(prior.RADIUS_UNITS_CHOICES),
+        default=None,
+        help="The radius convention of the --model-dir checkpoint: "
+             "'kpc' for priorA (8p_ZhaoPlumCOM) or 'rstar' for priorB "
+             '(8p_ZhaoPlumCOM_v3). It cannot be read off a checkpoint. '
+             'Ignored for --model, which takes each model\'s declared '
+             'convention from the registry.')
     parser.add_argument(
         '--device',
         default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -472,18 +812,16 @@ def main() -> None:
         import tempfile
         output_dir = Path(tempfile.mkdtemp(prefix='dsph_webapp_'))
 
-    model_dir = Path(args.model_dir)
-    ckpt_name = _resolve_checkpoint_filename(
-        model_dir, args.checkpoint_filename)
+    specs = _build_specs(args)
     device = torch.device(args.device)
-    print(f'[Model] Loading {model_dir / ckpt_name} on {device}...')
-    model, norm_dict, pre_transforms_config = inference.load_model(
-        str(model_dir), ckpt_name, device)
+    models = OrderedDict(
+        (spec['name'], _load_entry(spec, device)) for spec in specs)
+
     STATE.update(
-        model=model, norm_dict=norm_dict,
-        pre_transforms_config=pre_transforms_config, device=device,
-        model_dir=model_dir, output_dir=output_dir,
-        n_workers=max(1, args.profile_workers))
+        models=models, default_model=next(iter(models)), device=device,
+        output_dir=output_dir, n_workers=max(1, args.profile_workers))
+    print(f'[Server] Models: {", ".join(models)} '
+          f'(default {STATE["default_model"]})')
     print(f'[Server] Output dir: {output_dir}')
     print(f'[Server] http://{args.host}:{args.port}')
     uvicorn.run(app, host=args.host, port=args.port)

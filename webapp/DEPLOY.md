@@ -15,19 +15,27 @@ skip straight to Docker, jump to "2. On your laptop."
 
 ## 1. On Trillium: build the bundle
 
-The bundle (`webapp/dist/dsph_explorer.tar.gz`, built by `package.py`)
-is a self-contained copy of the app: the code, the trained model, and
-private copies of the packages it needs, plus a `Dockerfile` and
-`requirements.txt`. Nothing in it is Trillium-specific.
+The bundle (`webapp/dist/dsph_explorer.tar.gz`, built by
+`package.py`) is a self-contained copy of the app: the code, the
+trained models, and private copies of the packages it needs, plus a
+`Dockerfile` and `requirements.txt`. Nothing in it is
+Trillium-specific.
 
 ```bash
 # on Trillium
 cd ~/projects/sbi_dsph/sbi_dsph_pipeline/webapp
-python package.py \
-    --checkpoint-dir /scratch/tvnguyen/trained_models/npe/8p_ZhaoPlumCOM/sfaqzcwx/checkpoints \
-    --checkpoint-filename last.ckpt
-# -> webapp/dist/dsph_explorer.tar.gz (already built and current as of this session)
+python package.py --model 8p_priorA --model 8p_v3
+# -> webapp/dist/dsph_explorer/ and dsph_explorer.tar.gz
 ```
+
+Name as many models as the recipient should be able to compare; the
+bundled app offers them in a dropdown and switches between them
+without a restart. `--model` takes each one's radius convention from
+`npe_inference/configs/models.py` (`8p_priorA`, `8p_v3`, `8p_v3_5M`),
+which is the only place that convention is written down - nothing in
+a checkpoint records it. To ship a checkpoint that file does not
+list, use `--checkpoint-dir DIR --radius-units {kpc,rstar}` and
+assert it yourself.
 
 Download it to your laptop:
 
@@ -36,6 +44,12 @@ Download it to your laptop:
 scp trillium:/home/tvnguyen/projects/sbi_dsph/sbi_dsph_pipeline/webapp/dist/dsph_explorer.tar.gz .
 tar xzf dsph_explorer.tar.gz && cd dsph_explorer
 ```
+
+That is the **source bundle** - plain files plus a `Dockerfile`, ~28 MB.
+It is not a Docker image, and in particular it is not the
+`dsph-explorer.tar.gz` (hyphen) that §4B produces with `docker save`.
+The two differ by one character and are not interchangeable: this one
+you `tar xzf` and then `docker build`; that one you `docker load`.
 
 ## 2. On your laptop: build and run the Docker image
 
@@ -90,7 +104,7 @@ machine.
 
 **Bonus artifact:** that Apptainer validation also produced a working
 Apptainer/Singularity image, `webapp/dist/dsph_explorer.sif`
-(~414 MB, still on Trillium). If a collaborator is themselves on an
+(~440 MB, still on Trillium). If a collaborator is themselves on an
 HPC cluster or other Linux box with Apptainer/Singularity (common in
 astro) rather than a laptop with Docker Desktop, you can hand them
 this file directly - no build step on their end at all:
@@ -101,9 +115,27 @@ apptainer run dsph_explorer.sif   # binds 0.0.0.0:8799 directly, no -p mapping n
 ```
 
 The recipe that produced it, `webapp/dist/dsph_explorer.def`, is
-saved alongside it - regenerate with `apptainer build --fakeroot
-dsph_explorer.sif dsph_explorer.def` (run from the bundle's parent
-directory) any time you rebuild the bundle for a new model.
+saved alongside it. Rebuild it whenever you rebuild the bundle - the
+`.sif` bakes in a *copy* of `dist/dsph_explorer/`, so a rebuilt bundle
+does not reach an existing image:
+
+```bash
+# on Trillium, from anywhere - the .def names the bundle by absolute path
+export APPTAINER_TMPDIR=/scratch/$USER/apptainer_tmp   # /tmp is too small
+mkdir -p $APPTAINER_TMPDIR
+cd ~/projects/sbi_dsph/sbi_dsph_pipeline/webapp/dist
+apptainer build --force --fakeroot dsph_explorer.sif dsph_explorer.def
+```
+
+Takes ~5 minutes. `--force` overwrites the existing image, which it
+otherwise refuses to do non-interactively. `--fakeroot` works
+unprivileged here (Apptainer 1.5 uses user namespaces; no
+`/etc/subuid` entry needed) - without it the build still succeeds but
+leaves an "unlinkat ... directory not empty" cleanup error behind.
+Don't touch `$APPTAINER_TMPDIR` while a build is running; deleting it
+mid-build corrupts the rootfs being assembled. The `.def`'s `%files`
+line names the bundle by absolute path, so update it if the checkout
+moves.
 
 ## 4. On your laptop: share the image with a collaborator
 
@@ -135,6 +167,11 @@ Send `dsph-explorer.tar.gz` however you'd send any large file (scp, a
 shared drive, WeTransfer, ...). They load it with `docker load <
 dsph-explorer.tar.gz`, then `docker run -p 8799:8799 dsph-explorer` as
 in §2.
+
+Note this file does not exist yet on Trillium and is not the bundle
+from §1 - it is produced by the `docker save` above, on whichever
+machine built the image. `RUNNING_THE_APP.md`, which is written for
+the recipient, describes *this* file.
 
 Either way, that's the entire recipient-side workflow: install Docker
 Desktop, one `docker run`, open a browser tab - see
@@ -263,10 +300,18 @@ sudo systemctl enable --now dsph-explorer
 
 Same nginx/access-control setup as above in front of it.
 
-## Swapping in a different model
+## Changing which models are shipped
 
-Replace the two files in `model/` (any Lightning `.ckpt` plus the
-`config_snapshot.json` written next to it by `npe/train_npe.py`) and
-rebuild - `python package.py --checkpoint-dir <other run>` on
-Trillium, then repeat from §2 on whichever machine builds/runs the
-image.
+Re-run `package.py` on Trillium with a different `--model` list, then
+repeat from §2 on whichever machine builds/runs the image (and rebuild
+the `.sif` per §3 if you hand that out). Nothing downstream needs to
+know which models are inside: each lands in `models/<name>/` with a
+`model_spec.json` declaring its radius convention, and the app builds
+its dropdown from whatever directories it finds there.
+
+To add a model to an unpacked bundle by hand, make a new
+`models/<name>/` holding the Lightning `.ckpt`, the
+`config_snapshot.json` written next to it by `npe/train_npe.py`, and a
+`model_spec.json` of `{"radius_units": "kpc"}` or `"rstar"`. The app
+refuses to start a model directory that has neither that file nor an
+explicit `--radius-units`.

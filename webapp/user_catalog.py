@@ -27,7 +27,6 @@ themselves).
 """
 
 import re
-import sys
 from pathlib import Path
 
 import astropy.table as at
@@ -36,12 +35,13 @@ import numpy as np
 import pandas as pd
 from astropy.coordinates import SkyCoord
 
-# In the packaged bundle, `tsnpe`/`dsph_analysis` sit next to this
-# file; in the repo, the tsnpe package lives in ../tsnpe.
-_APP_DIR = Path(__file__).resolve().parent
-for _p in (_APP_DIR, _APP_DIR.parent / 'tsnpe'):
-    if _p.is_dir() and str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+# See app_paths for where these packages are imported from. Calling
+# setup() here as well as in inference.py is deliberate: neither module
+# may assume the other was imported first, and setup() is idempotent.
+import app_paths
+
+app_paths.setup()
+
 from tsnpe.target import TargetData
 
 from dsph_analysis import data_utils

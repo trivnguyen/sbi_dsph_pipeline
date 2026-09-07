@@ -322,6 +322,12 @@ const DS_LIST = ['A', 'B'];
 const INK = '#1f2430';
 
 const ST = { A: freshState(), B: freshState() };
+
+// Loaded models, from /api/config. Radius units are a property of the
+// checkpoint rather than a setting: each model declares its own and the
+// posterior is converted to kpc either way, so the selector reports the
+// convention instead of offering it.
+let MODELS = [];
 function freshState() {
   return { uploadId: null, fileColumns: [], result: null,
            preview: null };
@@ -632,13 +638,19 @@ function datasetPanelHTML(ds) {
         key and clicking Prefill.</p>
       <div id="${ds}_detectInfo" class="hint"
            style="margin-top:-4px"></div>
+      <p class="hint" style="margin:6px 0 0">The model conditions on
+        R_half over a window set by its uncertainty, so at least one
+        error bar is required — a zero-width window admits no posterior
+        draws.</p>
       <div class="grid3">
         <label class="field"><span>R_half [kpc]
             <span class="req">*</span></span>
           <input type="number" id="${ds}_rhalf_kpc" step="any"></label>
-        <label class="field"><span>R_half −err [kpc]</span>
+        <label class="field"><span>R_half −err [kpc]
+            <span class="req">*</span></span>
           <input type="number" id="${ds}_rhalf_kpc_em" step="any"></label>
-        <label class="field"><span>R_half +err [kpc]</span>
+        <label class="field"><span>R_half +err [kpc]
+            <span class="req">*</span></span>
           <input type="number" id="${ds}_rhalf_kpc_ep" step="any"></label>
         <label class="field"><span>Center RA [deg]</span>
           <input type="number" id="${ds}_center_ra_deg" step="any"
@@ -686,7 +698,10 @@ function datasetPanelHTML(ds) {
     </fieldset>
 
     <fieldset>
-      <legend>3 · Sampling</legend>
+      <legend>3 · Model &amp; sampling</legend>
+      <label class="field" style="margin-bottom:6px"><span>Model</span>
+        <select id="${ds}_model"></select></label>
+      <p class="hint" id="${ds}_modelNote" style="margin:0 0 10px"></p>
       <div class="grid2">
         <label class="field"><span>Posterior samples</span>
           <input type="number" id="${ds}_n_samples" value="1000"></label>
@@ -921,7 +936,7 @@ function collectPayload(ds) {
     'vlos_systemic_kms', 'pmra_masyr', 'pmdec_masyr',
     'radius_min', 'radius_max', 'radius_unit', 'vlos_abs_max',
     'n_samples', 'batch_size', 'n_profile_samples', 'n_bins',
-    'gamma_min', 'gamma_max',
+    'gamma_min', 'gamma_max', 'model',
     // Read per-dataset despite sitting in the catalog block, which B can
     // otherwise share wholesale: B reuses A's file, its own filter.
     'query'];
@@ -953,9 +968,15 @@ function gammaCutText(s) {
 function summaryTable(ds, s) {
   const i = s.info;
   const rows = s.params.map((p) =>
-    `<tr><td>${p.name}</td><td>${fmt(p.median)}
+    `<tr><td>${p.name}${p.unit
+        ? ` <span style="color:#667085">[${p.unit}]</span>` : ''}</td>
+     <td>${fmt(p.median)}
      <span style="color:#667085">+${fmt(p.plus)} / −${fmt(p.minus)}
      </span></td></tr>`).join('');
+  const modelRow = s.model == null ? '' :
+    `<tr><td>Model</td><td>${s.model}
+       <span style="color:#667085">· trained in
+       ${s.model_radius_units} radii, shown in kpc</span></td></tr>`;
   const req = s.n_posterior_requested;
   const kept = s.n_posterior_samples;
   const gcut = gammaCutText(s);
@@ -992,6 +1013,7 @@ function summaryTable(ds, s) {
       <tr><td>v_sys / persp. corr.</td>
           <td>${fmt(i.vlos_systemic_kms)} km/s ·
               ${i.perspective_corr_applied ? 'applied' : 'off'}</td></tr>
+      ${modelRow}
       <tr><td>Posterior samples</td>
           <td>${postCell} ·
               <a href="/api/posterior/${s.job_id}">download CSV</a></td></tr>
@@ -1778,7 +1800,14 @@ async function onRun() {
 }
 
 // --- wiring --------------------------------------------------------------
+function showModelNote(ds) {
+  const m = MODELS.find((x) => x.name === q(ds, 'model').value);
+  q(ds, 'modelNote').textContent = m
+    ? `radii: ${m.radius_units}` + (m.note ? ` — ${m.note}` : '') : '';
+}
+
 function wireDataset(ds) {
+  q(ds, 'model').addEventListener('change', () => showModelNote(ds));
   q(ds, 'fileInput').addEventListener('change', () => onFileChange(ds));
   q(ds, 'prefillBtn').addEventListener('click', () => onPrefill(ds));
   q(ds, 'rhalf_kpc').addEventListener('input', updateRunButton);
@@ -1859,8 +1888,17 @@ function initDatasets() {
   renderCredits();
   try {
     const cfg = await api('/api/config');
+    MODELS = cfg.models;
     $('serverInfo').textContent =
-      `model: ${cfg.model} · device: ${cfg.device}`;
+      `${MODELS.length} model${MODELS.length === 1 ? '' : 's'} loaded` +
+      ` · device: ${cfg.device} · output in kpc`;
+    for (const ds of ['A', 'B']) {
+      q(ds, 'model').innerHTML = MODELS.map((m) =>
+        `<option value="${m.name}"${m.name === cfg.default_model
+          ? ' selected' : ''}>${m.name}</option>`).join('');
+      q(ds, 'model').disabled = MODELS.length < 2;
+      showModelNote(ds);
+    }
     const sys = await api('/api/systems');
     $('lvdbKeys').innerHTML =
       sys.keys.map((k) => `<option value="${k}">`).join('');

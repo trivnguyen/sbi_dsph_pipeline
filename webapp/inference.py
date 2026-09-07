@@ -10,11 +10,22 @@ bundle - see webapp/README.md.
 The model directory format is what npe/train_npe.py leaves behind: a
 Lightning `.ckpt` (norm_dict embedded in its hyperparameters) plus a
 `config_snapshot.json` next to it or up to a few parent levels above.
+
+Radius units
+------------
+`tsnpe.proposal.sample_posterior` returns draws in the units the
+*model* predicts, which for the radius columns is not kpc:
+`df_log_ra` is log10(r_a / r_star) under every model, and
+`dm_log_rdm` is too under `radius_units='rstar'` (priorB). The Jeans
+code wants kpc, so `to_physical_kpc` sits between the two and
+everything downstream of it (`_jeans_worker`, `_theta_from_params`)
+is kpc-only. Which convention a given checkpoint uses is not recorded
+in it - see `build_prior` - so it is declared per model, once, and
+app.py carries it alongside the flow it belongs to.
 """
 
 import json
 import logging
-import sys
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -33,12 +44,13 @@ import numpy as np
 import torch
 from ml_collections import ConfigDict
 
-# In the packaged bundle, `tsnpe`/`jgnn`/`dsph_analysis` sit next to
-# this file; in the repo, the tsnpe package lives in ../tsnpe.
-_APP_DIR = Path(__file__).resolve().parent
-for _p in (_APP_DIR, _APP_DIR.parent / 'tsnpe'):
-    if _p.is_dir() and str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+# `tsnpe`/`jgnn`/`dsph_analysis` come from the bundle's vendored
+# copies or from the repo checkout - see app_paths for which, and why
+# the two are mutually exclusive rather than one falling back to the
+# other.
+import app_paths
+
+app_paths.setup()
 
 from tsnpe import prior
 from tsnpe.model_io import build_npe
@@ -54,6 +66,33 @@ PROFILE_KEYS = ('rho', 'mass', 'beta', 'sigma', 'kappa')
 # Inner (central) density log-slope gamma; the UI can restrict the
 # posterior to a sub-range of it (see restrict_gamma).
 GAMMA_PARAM = 'dm_gamma'
+
+# Column indices into a posterior row, in `prior.ALL_PARAM_NAMES` order:
+# (dm_alpha, dm_beta, dm_gamma, dm_log_rdm, dm_log_rho0, df_beta0,
+#  df_log_ra, stellar_log_rstar).
+I_LOG_RDM = prior.PARAM_NAMES.index('dm_log_rdm')
+I_LOG_RA = prior.PARAM_NAMES.index('df_log_ra')
+I_COND = prior.CONDITIONING_INDEX
+
+# The radius columns, once to_physical_kpc has run. Used to label the
+# corner plot and the CSV, and to decide which panels get the r_star
+# reference marker.
+RADIUS_PARAM_INDICES = (I_LOG_RDM, I_LOG_RA)
+
+# Posterior column names once converted to kpc. The `_kpc` suffixes
+# mark the columns that conversion moves, since a downloaded CSV
+# outlives any note about which convention it holds.
+KPC_PARAM_NAMES = [
+    f'{name}_kpc'
+    if i in RADIUS_PARAM_INDICES or i == I_COND else name
+    for i, name in enumerate(prior.ALL_PARAM_NAMES)
+]
+
+CORNER_LABELS = [
+    f'{name} [kpc]' if i in RADIUS_PARAM_INDICES or i == I_COND
+    else name
+    for i, name in enumerate(prior.ALL_PARAM_NAMES)
+]
 
 # Stands in for r_a=inf: GeneralizedOMJeans.dbeta_dr divides by r_a**2,
 # so a literal inf produces 0 * inf = nan in kurtosis_los.
@@ -119,6 +158,86 @@ def load_model(model_dir: str, checkpoint_filename: str, device):
     model.eval()
     model.to(device)
     return model, norm_dict, full_config.pre_transforms
+
+
+def to_physical_kpc(
+    posterior: np.ndarray, radius_units: str,
+) -> np.ndarray:
+    """Put every radius column of a posterior into log10(r / kpc).
+
+    `sample_posterior` returns draws in the *model's own* radius units
+    (it only un-normalizes with norm_dict; it never converts), so this
+    has to run before any row reaches GeneralizedOMJeans. Two separate
+    conversions, both keyed off the conditioning column
+    `stellar_log_rstar`, which is always log10(r_star / kpc):
+
+    * `dm_log_rdm` is log10(r_dm / r_star) under `radius_units='rstar'`
+      (priorB, e.g. 8p_ZhaoPlumCOM_v3) and already log10(r_dm / kpc)
+      under `'kpc'` (priorA, e.g. 8p_ZhaoPlumCOM), so only the former
+      is shifted.
+    * `df_log_ra` is log10(r_a / r_star) under **both** conventions -
+      the training simulators for priorA and priorB both wrote an
+      explicit `r_a = 10 ** log_ra * r_star` (see tsnpe/tsnpe/sims.py,
+      and npe/simulate_8params_process_prior{A,B}.py, which is what
+      actually built the two datasets). It is therefore *always*
+      shifted, whatever the model.
+
+    Kept deliberately identical to `plotting/posterior_diagnostics.py`
+    and `npe_infer.sampling.to_physical_kpc` in the repo - all three
+    read the same checkpoints, so they must agree here or their
+    profiles diverge.
+
+    Args:
+        posterior: (N, 8) draws in the model's own radius units,
+            columns in `prior.ALL_PARAM_NAMES` order.
+        radius_units: The model's convention, 'kpc' or 'rstar'.
+
+    Returns:
+        (N, 8) draws with every radius column in log10(r / kpc).
+
+    Raises:
+        ValueError: If `radius_units` is not recognized.
+    """
+    if radius_units not in prior.RADIUS_UNITS_CHOICES:
+        raise ValueError(
+            f'radius_units={radius_units!r} not recognized; must be '
+            f'one of {prior.RADIUS_UNITS_CHOICES}')
+    physical = np.asarray(posterior, dtype=float).copy()
+    log_rstar = physical[:, I_COND]
+    if radius_units == 'rstar':
+        physical[:, I_LOG_RDM] = physical[:, I_LOG_RDM] + log_rstar
+    physical[:, I_LOG_RA] = physical[:, I_LOG_RA] + log_rstar
+    return physical
+
+
+def build_prior(
+    radius_units: str, prior_min: Optional[dict] = None,
+    prior_max: Optional[dict] = None,
+) -> 'prior.Prior':
+    """Construct the prior box `sample_posterior` cuts against.
+
+    A checkpoint cannot tell you its own radius convention - the
+    training config snapshot npe/train_npe.py writes has no `prior`
+    block - so `radius_units` is a deliberate per-model declaration,
+    exactly as in npe_inference's `configs/models.py`. Getting it wrong
+    does not raise; it silently shifts `dm_log_rdm` by a factor of
+    r_star, which is why app.py refuses to guess.
+
+    Args:
+        radius_units: 'kpc' (priorA) or 'rstar' (priorB).
+        prior_min: Box-space lower bounds by parameter name. None takes
+            `tsnpe.prior`'s priorA defaults, which the whole
+            8-parameter family shares.
+        prior_max: Upper bounds, same rules.
+
+    Returns:
+        The `tsnpe.prior.Prior` for this model.
+
+    Raises:
+        ValueError: If `radius_units` or either bounds dict is invalid.
+    """
+    return prior.Prior(prior_min=prior_min, prior_max=prior_max,
+                       radius_units=radius_units)
 
 
 def restrict_gamma(
@@ -258,7 +377,10 @@ def plot_corner(posterior: np.ndarray, save_path: Path, title: str,
     """Save a corner plot of physical-unit posterior samples.
 
     Args:
-        posterior: (n_samples, n_params) physical-unit samples.
+        posterior: (n_samples, n_params) samples with every radius
+            column already in log10(r / kpc), i.e. to_physical_kpc
+            output - the r_star marker below reads the conditioning
+            column directly, so a model-unit array would mislabel it.
         save_path: PNG output path.
         title: Figure suptitle prefix.
         options: Optional corner.corner styling overrides. Recognized
@@ -278,7 +400,7 @@ def plot_corner(posterior: np.ndarray, save_path: Path, title: str,
     contours = o.get('contours', 'default')
 
     kwargs = dict(
-        labels=prior.ALL_PARAM_NAMES, color=o.get('color', '#2a78d6'),
+        labels=CORNER_LABELS, color=o.get('color', '#2a78d6'),
         show_titles=True, title_fmt='.2f', quantiles=[0.16, 0.5, 0.84],
         range=_corner_ranges(posterior), bins=int(o.get('bins') or 20),
         smooth=smooth, smooth1d=smooth,
@@ -294,6 +416,26 @@ def plot_corner(posterior: np.ndarray, save_path: Path, title: str,
         kwargs.update(plot_contours=True, fill_contours=True)
 
     fig = corner.corner(posterior, **kwargs)
+
+    # Both radius parameters are bounded relative to r_star rather than
+    # in absolute kpc, so where a draw sits relative to it is the part
+    # that carries information. Mark it on exactly those panels.
+    log_rstar = float(np.median(posterior[:, I_COND]))
+    ndim = posterior.shape[1]
+    axes = np.array(fig.axes).reshape((ndim, ndim))
+    marker = dict(color='#d1495b', linestyle='--', linewidth=1.2,
+                  zorder=5)
+    for i in RADIUS_PARAM_INDICES:
+        for row in range(i, ndim):       # panels with this param on x
+            axes[row, i].axvline(log_rstar, **marker)
+        for col in range(i):             # panels with this param on y
+            axes[i, col].axhline(log_rstar, **marker)
+    fig.legend(
+        handles=[plt.Line2D([], [], **marker)],
+        labels=[r'median $\log_{10}(r_\star/\mathrm{kpc})$'
+                f' = {log_rstar:.2f}'],
+        loc='upper right', frameon=False, fontsize=12)
+
     fig.suptitle(f'{title} (N={len(posterior)})', y=1.02, fontsize=13)
     fig.savefig(save_path, dpi=130, bbox_inches='tight')
     plt.close(fig)
