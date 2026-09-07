@@ -67,6 +67,24 @@ def get_config() -> ConfigDict:
         'graph_args': {'ratio': 0.2, 'loop': True},
     }
 
+    # Prior box, pinned into round_0/prior_config.json at registration.
+    # Must match the training set the round-0 model came from: the bounds
+    # are that set's config.<n>.json prior_min/prior_max with the
+    # conditioning column (stellar_log_rstar) dropped.
+    #   radius_units='kpc'   priorA / 8p_ZhaoPlumCOM
+    #   radius_units='rstar' priorB / 8p_ZhaoPlumCOM_v3
+    # Omit any field to take the priorA defaults (tsnpe.prior.Prior).
+    config.prior = ConfigDict()
+    config.prior.radius_units = 'kpc'
+    config.prior.prior_min = ConfigDict(dict(
+        dm_alpha=0.5, dm_beta=1.0, dm_gamma=-1.0, dm_log_rdm=0.0,
+        dm_log_rho0=3.0, df_beta0=-0.499, df_log_ra=-1.0,
+    ))
+    config.prior.prior_max = ConfigDict(dict(
+        dm_alpha=3.0, dm_beta=10.0, dm_gamma=2.0, dm_log_rdm=3.0,
+        dm_log_rho0=10.0, df_beta0=1.0, df_log_ra=3.0,
+    ))
+
     config.proposal = ConfigDict()
     config.proposal.n_sims = 1000
     config.proposal.epsilon = 1e-3

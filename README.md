@@ -31,24 +31,29 @@ tsnpe/    truncated sequential NPE - register npe's checkpoint, then round
           by round: simulate a truncated proposal, fine-tune.
 ```
 
+Run configs under `npe/configs/` and `tsnpe/configs/` are **git-ignored**:
+they hard-code scratch paths, wandb run ids and target catalogs, so they
+are personal to whoever is running them. Files matching `*_example.py`
+are the exception and stay tracked as documented starting points.
+
 ## Workflow
 
 ```bash
 # 1. Simulate npe's training data (wide prior, no target observation
 #    involved yet)
 cd npe
-python simulate_8params_process.py --n-sims 100000 \
+python simulate_8params_process_priorA.py --n-sims 100000 \
     --output-dir /scratch/$USER/datasets/8p_ZhaoPlumCOM
 
 # 2. Train the baseline NPE - locally, or via slurm/submit.sh on a cluster
-python train_npe.py --config configs/chebconv_8params.py
+python train_npe.py --config configs/my_run.py
 
 # 3. Feed that checkpoint into tsnpe's truncated rounds against a real
 #    target observation (config.pretrained points at npe's wandb run or
 #    a local checkpoint - see tsnpe/README.md)
 cd ../tsnpe
-python register_run.py --config configs/draco.py
-./run_pipeline.sh --config configs/draco.py --rounds 5
+python register_run.py --config configs/my_run.py
+./run_pipeline.sh --config configs/my_run.py --rounds 5
 ```
 
 `npe` and `tsnpe` are otherwise independent to run — `tsnpe` only ever

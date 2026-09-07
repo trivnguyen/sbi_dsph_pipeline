@@ -69,7 +69,7 @@ def _gaussian_conditioning_draws(
     return np.log10(rhalf_mc)
 
 def _prior_conditioning_draws(
-    target: TargetData, n_mc_conditioning: int, n_sigma: float = 5.0,
+    prior, target: TargetData, n_mc_conditioning: int, n_sigma: float = 5.0,
 ) -> np.ndarray:
     """Conditioning draws from the conditioning prior (prior.sample_conditioning).
 
@@ -81,7 +81,7 @@ def _prior_conditioning_draws(
     nearly every draw in the middle fifth of a +-5 sigma window and leave
     the rest carrying real target mass with almost no samples.
     """
-    return prior_lib.sample_conditioning(
+    return prior.sample_conditioning(
         target, n_mc_conditioning, n_sigma=n_sigma)
 
 
@@ -141,7 +141,7 @@ def _embed_observation(model, obs_graph) -> torch.Tensor:
 
 
 def _sample_posterior_mc_fast(
-    model, target: TargetData, norm_dict: dict, pre_transforms,
+    model, prior, target: TargetData, norm_dict: dict, pre_transforms,
     cond_mc: np.ndarray, n_samples: int, return_log_prob: bool = False,
 ):
     """Fast path for _sample_posterior_mc - see _embed_observation and
@@ -183,7 +183,7 @@ def _sample_posterior_mc_fast(
 
 
 def _sample_posterior_mc_safe(
-    model, target: TargetData, norm_dict: dict, pre_transforms,
+    model, prior, target: TargetData, norm_dict: dict, pre_transforms,
     cond_mc: np.ndarray, n_samples: int, return_log_prob: bool = False,
     batch_size: int = 64,
 ):
@@ -259,7 +259,7 @@ def _sample_posterior_mc_safe(
 
 
 def _sample_posterior_mc(
-    model, target: TargetData, norm_dict: dict, pre_transforms,
+    model, prior, target: TargetData, norm_dict: dict, pre_transforms,
     cond_mc: np.ndarray, n_samples: int, return_log_prob: bool = False,
     batch_size: int = 64,
 ):
@@ -269,16 +269,16 @@ def _sample_posterior_mc(
     """
     if _supports_fast_embedding(model):
         return _sample_posterior_mc_fast(
-            model, target, norm_dict, pre_transforms, cond_mc, n_samples,
+            model, prior, target, norm_dict, pre_transforms, cond_mc, n_samples,
             return_log_prob=return_log_prob)
     return _sample_posterior_mc_safe(
-        model, target, norm_dict, pre_transforms, cond_mc, n_samples,
+        model, prior, target, norm_dict, pre_transforms, cond_mc, n_samples,
         return_log_prob=return_log_prob, batch_size=batch_size)
 
 
-def _normalize(theta_box: np.ndarray, norm_dict: dict):
+def _normalize(prior, theta_box: np.ndarray, norm_dict: dict):
     """Map box-space samples to the model's (theta_norm, cond_norm)."""
-    theta_phys = prior_lib.to_kpc(theta_box)
+    theta_phys = prior.to_kpc(theta_box)
     n_base = len(prior_lib.PARAM_NAMES)
     theta_loc = np.asarray(norm_dict['theta_loc'])
     theta_scale = np.asarray(norm_dict['theta_scale'])
@@ -292,7 +292,8 @@ def _normalize(theta_box: np.ndarray, norm_dict: dict):
 
 
 def _log_prob_candidates_fast(
-    model, graph_embedding: torch.Tensor, norm_dict: dict, theta_box_batch,
+    model, prior, graph_embedding: torch.Tensor, norm_dict: dict,
+    theta_box_batch,
 ):
     """Fast path for _log_prob_candidates - see _embed_observation and
     _supports_fast_embedding. theta only ever feeds dist.log_prob(theta),
@@ -302,7 +303,7 @@ def _log_prob_candidates_fast(
     one chunk) and broadcast-added to every candidate's cheap
     conditional_mlp(cond) output.
     """
-    theta_norm, cond_norm = _normalize(theta_box_batch, norm_dict)
+    theta_norm, cond_norm = _normalize(prior, theta_box_batch, norm_dict)
     with torch.no_grad():
         cond_tensor = torch.tensor(
             cond_norm, dtype=torch.float32, device=graph_embedding.device)
@@ -316,7 +317,7 @@ def _log_prob_candidates_fast(
 
 
 def _log_prob_candidates_safe(
-    model, obs_graph, norm_dict, theta_box_batch, batch_size=64,
+    model, prior, obs_graph, norm_dict, theta_box_batch, batch_size=64,
 ):
     """Evaluate log q(theta | conditioning) for a batch of box-space candidates.
 
@@ -330,7 +331,7 @@ def _log_prob_candidates_safe(
     `pre_transforms=None` below is intentional; relies on the model itself
     having no pre_transforms of its own (see _sample_posterior_mc_safe).
     """
-    theta_norm, cond_norm = _normalize(theta_box_batch, norm_dict)
+    theta_norm, cond_norm = _normalize(prior, theta_box_batch, norm_dict)
     n = len(theta_norm)
     log_probs = []
     for start in tqdm(range(0, n, batch_size), desc='Log-prob candidates', unit='batch'):
@@ -364,6 +365,7 @@ def _posterior_to_phys(
 
 def sample_posterior(
     model,
+    prior,
     target: TargetData,
     norm_dict: dict,
     pre_transforms_config: dict,
@@ -408,7 +410,7 @@ def sample_posterior(
     if conditioning_dist == 'gaussian':
         cond_mc = _gaussian_conditioning_draws(target, n_mc_conditioning)
     elif conditioning_dist == 'prior':
-        cond_mc = _prior_conditioning_draws(
+        cond_mc = _prior_conditioning_draws(prior, 
             target, n_mc_conditioning, n_sigma=prior_n_sigma)
     elif conditioning_dist == 'uniform':
         cond_mc = _uniform_conditioning_draws(
@@ -420,11 +422,11 @@ def sample_posterior(
         )
 
     out = _sample_posterior_mc(
-        model, target, norm_dict, pre_transforms, cond_mc, n_samples,
+        model, prior, target, norm_dict, pre_transforms, cond_mc, n_samples,
         return_log_prob=return_log_prob, batch_size=batch_size)
     post_all, cond_all, log_q_all = out if return_log_prob else (*out, None)
 
-    # Convert first, then cut in box space via prior_lib.in_prior_box.
+    # Convert first, then cut in box space via prior.in_prior_box.
     # Under RADIUS_UNITS='kpc' a [-1, 1] cut on normalized theta cannot
     # express this box: dm_log_rdm is an offset from the conditioning value,
     # so its kpc bounds slide with each row's own cond, and the fixed-bound
@@ -433,7 +435,7 @@ def sample_posterior(
     # offsets down to -1.40.) 'rejection' was never affected; it draws in
     # box space already.
     post_phys_all = _posterior_to_phys(post_all, cond_all, norm_dict, concat=False)
-    in_box = prior_lib.in_prior_box(post_phys_all, target, n_sigma=prior_n_sigma)
+    in_box = prior.in_prior_box(post_phys_all, target, n_sigma=prior_n_sigma)
     if not in_box.any():
         raise RuntimeError(
             'All posterior samples fell outside the prior box. The '
@@ -447,6 +449,7 @@ def sample_posterior(
 
 def estimate_tau(
     model,
+    prior,
     target: TargetData,
     norm_dict: dict,
     pre_transforms_config: dict,
@@ -481,7 +484,7 @@ def estimate_tau(
         RuntimeError: If every posterior sample falls outside the prior box.
     """
     post_phys_all, log_q = sample_posterior(
-        model, target, norm_dict, pre_transforms_config,
+        model, prior, target, norm_dict, pre_transforms_config,
         prior_n_sigma=prior_n_sigma,
         n_samples=n_post_samples, n_mc_conditioning=n_mc_conditioning,
         return_log_prob=True, batch_size=batch_size)
@@ -497,7 +500,8 @@ def estimate_tau(
 
 
 def _sample_proposal_rejection(
-    model, target: TargetData, norm_dict: dict, pre_transforms_config: dict,
+    model, prior, target: TargetData, norm_dict: dict,
+    pre_transforms_config: dict,
     tau: float, n_sims: int, draw_batch: int, batch_size: int,
     oversample_cap: int, prior_n_sigma: float,
 ):
@@ -532,15 +536,16 @@ def _sample_proposal_rejection(
 
     pbar = tqdm(total=n_sims, desc='Sampling proposal', unit='accepted')
     while n_accepted < n_sims and n_drawn < n_max:
-        cands_box = prior_lib.sample_prior_box(draw_batch, target, n_sigma=prior_n_sigma)
+        cands_box = prior.sample_prior_box(
+            draw_batch, target, n_sigma=prior_n_sigma)
         if use_fast:
-            lq = _log_prob_candidates_fast(model, graph_embedding, norm_dict, cands_box)
+            lq = _log_prob_candidates_fast(model, prior, graph_embedding, norm_dict, cands_box)
         else:
             lq = _log_prob_candidates_safe(
-                model, obs_graph, norm_dict, cands_box, batch_size=batch_size)
+                model, prior, obs_graph, norm_dict, cands_box, batch_size=batch_size)
         mask = lq >= tau
         if mask.any():
-            accepted.append(prior_lib.to_kpc(cands_box[mask]))
+            accepted.append(prior.to_kpc(cands_box[mask]))
             n_accepted += int(mask.sum())
         n_drawn += draw_batch
         pbar.update(int(mask.sum()))
@@ -578,7 +583,8 @@ def _sample_proposal_rejection(
 
 
 def _sample_proposal_flow_rejection(
-    model, target: TargetData, norm_dict: dict, pre_transforms_config: dict,
+    model, prior, target: TargetData, norm_dict: dict,
+    pre_transforms_config: dict,
     tau: float, n_sims: int, draw_batch: int, batch_size: int,
     oversample_cap: int, prior_n_sigma: float = 5.0, rng=None,
 ):
@@ -612,7 +618,7 @@ def _sample_proposal_flow_rejection(
     pbar = tqdm(total=n_sims, desc='Sampling proposal (flow)', unit='accepted')
     while n_accepted < n_sims and n_drawn < n_max:
         theta, log_q = sample_posterior(
-            model, target, norm_dict, pre_transforms_config,
+            model, prior, target, norm_dict, pre_transforms_config,
             n_samples=draw_batch, n_mc_conditioning=draw_batch,
             conditioning_dist='prior', return_log_prob=True,
             batch_size=batch_size, prior_n_sigma=prior_n_sigma)
@@ -654,7 +660,8 @@ def _sample_proposal_flow_rejection(
 
 
 def calibrate_sampler(
-    model, target: TargetData, norm_dict: dict, pre_transforms_config: dict,
+    model, prior, target: TargetData, norm_dict: dict,
+    pre_transforms_config: dict,
     tau: float, calibration_draws: int = 20_000, batch_size: int = 64,
     prior_n_sigma: float = 5.0, rng=None,
 ):
@@ -676,17 +683,17 @@ def calibrate_sampler(
     pre_transforms = build_obs_pre_transforms(pre_transforms_config, norm_dict)
     x, pos = _x_obs_features(target)
     obs_graph = pre_transforms(Data(x=x, pos=pos))
-    cands_box = prior_lib.sample_prior_box(n, target, n_sigma=prior_n_sigma)
+    cands_box = prior.sample_prior_box(n, target, n_sigma=prior_n_sigma)
     if _supports_fast_embedding(model):
         emb = _embed_observation(model, obs_graph)
-        lq = _log_prob_candidates_fast(model, emb, norm_dict, cands_box)
+        lq = _log_prob_candidates_fast(model, prior, emb, norm_dict, cands_box)
     else:
         lq = _log_prob_candidates_safe(
-            model, obs_graph, norm_dict, cands_box, batch_size=batch_size)
+            model, prior, obs_graph, norm_dict, cands_box, batch_size=batch_size)
     acc_rejection = float((lq >= tau).mean())
 
     _, log_q = sample_posterior(
-        model, target, norm_dict, pre_transforms_config,
+        model, prior, target, norm_dict, pre_transforms_config,
         n_samples=n, n_mc_conditioning=n, conditioning_dist='prior',
         return_log_prob=True, batch_size=batch_size,
         prior_n_sigma=prior_n_sigma)
@@ -712,7 +719,8 @@ def calibrate_sampler(
 
 
 def _sample_proposal_sir(
-    model, target: TargetData, norm_dict: dict, pre_transforms_config: dict,
+    model, prior, target: TargetData, norm_dict: dict,
+    pre_transforms_config: dict,
     tau: float, n_sims: int, draw_batch: int, batch_size: int,
     oversample_cap: int, prior_n_sigma: float = 5.0,
 ):
@@ -745,7 +753,7 @@ def _sample_proposal_sir(
     pbar = tqdm(total=n_sims, desc='Sampling proposal (SIR)', unit='neff')
     while ess_total < n_sims and n_drawn < n_sims * oversample_cap:
         theta, log_q = sample_posterior(
-            model, target, norm_dict, pre_transforms_config,
+            model, prior, target, norm_dict, pre_transforms_config,
             n_samples=draw_batch, n_mc_conditioning=draw_batch,
             conditioning_dist='prior', return_log_prob=True,
             batch_size=batch_size, prior_n_sigma=prior_n_sigma)
@@ -791,6 +799,7 @@ def _sample_proposal_sir(
 
 def sample_tsnpe_proposal(
     model,
+    prior,
     target: TargetData,
     norm_dict: dict,
     pre_transforms_config: dict,
@@ -877,7 +886,7 @@ def sample_tsnpe_proposal(
     """
     model.eval()
     tau_result = estimate_tau(
-        model, target, norm_dict, pre_transforms_config,
+        model, prior, target, norm_dict, pre_transforms_config,
         epsilon=epsilon, n_post_samples=n_post_samples,
         n_mc_conditioning=n_mc_conditioning,
         return_posterior=return_posterior, batch_size=batch_size)
@@ -886,24 +895,24 @@ def sample_tsnpe_proposal(
     calibration = {}
     if sampling_mode == 'auto':
         sampling_mode, calibration = calibrate_sampler(
-            model, target, norm_dict, pre_transforms_config, tau,
+            model, prior, target, norm_dict, pre_transforms_config, tau,
             calibration_draws=calibration_draws,
             batch_size=batch_size, prior_n_sigma=prior_n_sigma)
         calibration['sampling_mode'] = sampling_mode
 
     if sampling_mode == 'rejection':
         proposal_phys, diagnostics = _sample_proposal_rejection(
-            model, target, norm_dict, pre_transforms_config, tau,
+            model, prior, target, norm_dict, pre_transforms_config, tau,
             n_sims=n_sims, draw_batch=draw_batch, batch_size=batch_size,
             oversample_cap=oversample_cap, prior_n_sigma=prior_n_sigma)
     elif sampling_mode == 'flow':
         proposal_phys, diagnostics = _sample_proposal_flow_rejection(
-            model, target, norm_dict, pre_transforms_config, tau,
+            model, prior, target, norm_dict, pre_transforms_config, tau,
             n_sims=n_sims, draw_batch=draw_batch, batch_size=batch_size,
             oversample_cap=oversample_cap, prior_n_sigma=prior_n_sigma)
     elif sampling_mode == 'sir':
         proposal_phys, diagnostics = _sample_proposal_sir(
-            model, target, norm_dict, pre_transforms_config, tau,
+            model, prior, target, norm_dict, pre_transforms_config, tau,
             n_sims=n_sims, draw_batch=draw_batch, batch_size=batch_size,
             oversample_cap=oversample_cap, prior_n_sigma=prior_n_sigma)
     else:

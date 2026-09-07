@@ -93,6 +93,7 @@ def prepare_data(config: ml_collections.ConfigDict, norm_dict=None):
         seed=config.seed_data,
         norm_dict=norm_dict,
         pre_transform_kwargs=dict(config.pre_transforms),
+        max_norm_graphs=config.get('max_norm_graphs', None),
     )
 
     return train_loader, val_loader, norm_dict
