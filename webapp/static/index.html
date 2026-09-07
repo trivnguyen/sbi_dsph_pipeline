@@ -1,0 +1,1911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dSph posterior explorer</title>
+<script src="/static/plotly.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #d9dde3;
+    --text: #1f2430; --muted: #667085; --accent: #2456c8;
+    --accent-dark: #1a3f96; --error: #b42318; --ok: #067647;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 14px 24px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 18px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { padding: 18px 24px 40px; max-width: 1700px; margin: 0 auto; }
+  #datasets {
+    display: grid; gap: 20px; align-items: start;
+    grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+  }
+  .dataset { max-width: 640px; }
+  .dataset > h2 {
+    font-size: 15px; margin: 0 0 10px; padding-left: 2px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .swatch { width: 13px; height: 13px; border-radius: 3px; }
+  fieldset {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; margin: 0 0 16px; padding: 14px 16px 16px;
+  }
+  legend { font-weight: 600; padding: 0 6px; }
+  .field { display: flex; flex-direction: column; gap: 3px; margin: 0; }
+  .field > span { color: var(--muted); font-size: 12.5px; }
+  input[type=text], input[type=number], select {
+    width: 100%; min-height: 36px; padding: 6px 10px;
+    border: 1px solid var(--border); border-radius: 6px;
+    font: inherit; background: #fff;
+  }
+  input[type=file] { width: 100%; padding: 8px 0; }
+  input[type=color] {
+    width: 42px; min-height: 30px; padding: 2px; border-radius: 6px;
+    border: 1px solid var(--border); background: #fff; cursor: pointer;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr;
+           gap: 10px 14px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr;
+           gap: 10px 14px; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 6px 0 10px; }
+  button {
+    padding: 10px 18px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; border-radius: 7px;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: var(--accent-dark); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.secondary { background: #fff; color: var(--accent); }
+  button.small { padding: 6px 12px; font-size: 13px; }
+  .btnrow { display: flex; gap: 12px; align-items: center;
+            margin: 4px 0 14px; flex-wrap: wrap; }
+  .toolbar {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    margin-bottom: 14px; font-size: 13.5px;
+  }
+  .toolbar label { display: flex; align-items: center; gap: 6px;
+                   cursor: pointer; }
+  #status { font-weight: 600; }
+  #status.busy { color: var(--accent); }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--error); }
+  #error {
+    display: none; white-space: pre-wrap; color: var(--error);
+    background: #fef3f2; border: 1px solid #fecdca; border-radius: 8px;
+    padding: 12px; font-size: 12px; max-height: 280px; overflow: auto;
+  }
+  #results { margin-top: 6px; }
+  .corner-row { display: flex; flex-wrap: wrap; gap: 16px; }
+  .corner-col { flex: 1 1 440px; min-width: 320px; }
+  .corner-col h3 { font-size: 13px; margin: 0 0 6px; color: var(--muted); }
+  .corner-col img {
+    max-width: 100%; background: #fff; border: 1px solid var(--border);
+    border-radius: 10px; display: block;
+  }
+  .summary-row { display: flex; flex-wrap: wrap; gap: 16px;
+                 margin-bottom: 16px; }
+  #profilesPlot {
+    background: #fff; border: 1px solid var(--border);
+    border-radius: 10px; margin-bottom: 6px;
+    max-width: 1040px;
+  }
+  table.summary {
+    border-collapse: collapse; background: var(--panel);
+    flex: 1 1 360px; min-width: 300px;
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; font-size: 13px; align-self: flex-start;
+  }
+  table.summary th, table.summary td {
+    padding: 6px 12px; border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  table.summary th { background: #f2f4f7; font-weight: 600; }
+  .axgrid {
+    display: grid; grid-template-columns: 150px 1fr 1fr;
+    gap: 8px 12px; align-items: center;
+  }
+  .axgrid > span { color: var(--muted); font-size: 12.5px; }
+  .axgrid .head { color: var(--text); font-weight: 600; font-size: 12px; }
+  .checkline { display: flex; align-items: center; gap: 8px;
+               margin: 3px 0; }
+  .checkline input[type=checkbox] { width: auto; min-height: 0; }
+  .req { color: var(--error); }
+  .preview-row { display: flex; flex-wrap: wrap; gap: 12px;
+                 align-items: flex-start; }
+  .preview-panel {
+    background: #fff; border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .preview-head { display: flex; justify-content: flex-end;
+                  padding: 3px 4px 0; }
+  .preview-enlarge {
+    padding: 1px 8px; font-size: 11px; font-weight: 500;
+    background: #fff; color: var(--accent);
+    border: 1px solid var(--border); border-radius: 5px;
+    cursor: pointer; min-height: 0;
+  }
+  .preview-enlarge:hover { background: #f2f4f7; color: var(--accent); }
+  footer#credits {
+    margin-top: 34px; padding: 18px 24px 34px;
+    border-top: 1px solid var(--border); background: var(--panel);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .credits-inner { max-width: 1700px; margin: 0 auto; }
+  .credits-line { margin-top: 5px; }
+  footer#credits a { color: var(--accent); }
+  footer#credits .cite {
+    margin: 10px 0 0; padding: 9px 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px;
+    max-width: 900px;
+  }
+  footer#credits .cite ul { margin: 6px 0 0; padding-left: 18px; }
+  footer#credits .cite li { margin-bottom: 3px; }
+  .credits-more { margin-top: 10px; }
+  .credits-more summary { cursor: pointer; }
+  .credits-more ul { margin: 6px 0; padding-left: 18px; }
+  .spinner {
+    display: inline-block; width: 13px; height: 13px;
+    border: 2px solid var(--accent); border-top-color: transparent;
+    border-radius: 50%; animation: spin .8s linear infinite;
+    vertical-align: -2px; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>dSph posterior explorer</h1>
+  <span class="sub" id="serverInfo">connecting&hellip;</span>
+</header>
+
+<datalist id="lvdbKeys"></datalist>
+
+<main>
+  <div class="toolbar">
+    <label><input type="checkbox" id="compareToggle">
+      Compare a second dataset</label>
+    <span class="hint" style="margin:0">Overplot two runs on the same
+      panels — useful for A vs B, or the same stars under different
+      settings.</span>
+  </div>
+
+  <section id="datasets"></section>
+
+  <div class="btnrow">
+    <button id="runBtn" disabled>Run inference</button>
+    <span id="status"></span>
+  </div>
+  <pre id="error"></pre>
+
+  <section id="results">
+    <div class="summary-row" id="summaryRow"></div>
+
+    <fieldset id="displayBox" style="display:none">
+      <legend>Display options</legend>
+      <div class="grid2">
+        <div>
+          <p class="hint" style="margin-top:0"><b>Credible bands</b> —
+            central %, widest drawn faintest. Uncheck a level to hide
+            it; edit the number to change the percentile.</p>
+          <div id="bandRows"></div>
+          <label class="field" style="margin-top:8px; max-width:210px">
+            <span>Band opacity (innermost)</span>
+            <input type="number" id="band_opacity" step="0.05"
+                   min="0.02" max="0.6" value="0.25"></label>
+        </div>
+        <div>
+          <p class="hint" style="margin-top:0"><b>Series</b></p>
+          <label class="checkline"><input type="checkbox"
+            id="show_median" checked> Median line</label>
+          <label class="checkline"><input type="checkbox"
+            id="show_binned" checked> Binned data points</label>
+          <label class="checkline"><input type="checkbox"
+            id="show_wolf" checked> Wolf radius / mass</label>
+          <label class="field" style="margin-top:8px; max-width:210px">
+            <span>Median line width</span>
+            <input type="number" id="line_width" step="0.5" min="0.5"
+                   value="2"></label>
+          <div id="dsColorRows" style="margin-top:10px"></div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset id="layoutBox" style="display:none">
+      <legend>Panel layout</legend>
+      <p class="hint" style="margin-top:0">Rearrange the profile panels
+        and resize the plot. There are <b>5</b> panels; rows are filled
+        left-to-right, top-to-bottom. Rows auto-grow if you don't give
+        enough for the chosen columns.</p>
+      <div class="grid3" style="max-width:640px">
+        <label class="field"><span>Rows (blank = fit)</span>
+          <input type="number" id="lay_rows" min="1" max="5" step="1"
+                 placeholder="auto"></label>
+        <label class="field"><span>Columns</span>
+          <input type="number" id="lay_cols" min="1" max="5" step="1"
+                 value="1"></label>
+        <label class="field"><span>&nbsp;</span>
+          <label class="checkline" style="min-height:36px">
+            <input type="checkbox" id="lay_shareX" checked>
+            Share x-axis</label></label>
+        <label class="field"><span>Plot width [px] (blank = auto)</span>
+          <input type="number" id="lay_width" min="300" step="10"
+                 placeholder="auto"></label>
+        <label class="field"><span>Plot height [px] (blank = auto)</span>
+          <input type="number" id="lay_height" min="200" step="10"
+                 placeholder="auto"></label>
+      </div>
+    </fieldset>
+
+    <fieldset id="axisBox" style="display:none">
+      <legend>Axis ranges</legend>
+      <p class="hint">Type real values (e.g. <code>1e5</code>); leave a
+        box blank to autoscale that end. Or just use the mouse on the
+        plot: drag to zoom, double-click to reset.</p>
+      <div class="axgrid">
+        <span class="head">Axis</span>
+        <span class="head">min</span>
+        <span class="head">max</span>
+      </div>
+      <div class="axgrid" id="axisGrid" style="margin-top:6px"></div>
+      <div class="btnrow" style="margin-top:12px">
+        <button id="applyAxisBtn" class="small">Apply ranges</button>
+        <button id="autoscaleBtn" class="secondary small">
+          Autoscale all</button>
+      </div>
+    </fieldset>
+
+    <div class="btnrow" id="plotToolbar"
+         style="display:none; justify-content:flex-end; margin:0 0 6px">
+      <button id="copyPlotBtn" class="secondary small">
+        Copy plot image</button>
+    </div>
+    <div id="profilesPlot" style="display:none"></div>
+    <p class="hint" id="plotCaption" style="display:none">
+      Solid line = posterior median. Shaded bands = credible intervals
+      (configure levels/colors above). Points = binned data. Dotted
+      vertical line + diamond = Wolf radius / mass.</p>
+
+    <fieldset id="cornerBox" style="display:none">
+      <legend>Corner plot</legend>
+      <label class="checkline" style="margin-bottom:8px">
+        <input type="checkbox" id="corner_show" checked>
+        Show corner plot</label>
+      <p class="hint" style="margin-top:0">Styling of
+        <code>corner.corner</code>. Changing these re-renders the plot
+        from the stored posterior (no re-run needed) — click
+        <b>Update corner</b> to apply.</p>
+      <div class="grid3" style="max-width:640px">
+        <label class="field"><span>Smoothing (blank = none)</span>
+          <input type="number" id="corner_smooth" step="0.1" min="0"
+                 placeholder="none"></label>
+        <label class="field"><span>Bins per parameter</span>
+          <input type="number" id="corner_bins" step="1" min="5"
+                 value="20"></label>
+        <label class="field"><span>Contours</span>
+          <select id="corner_contours">
+            <option value="default" selected>default (lines)</option>
+            <option value="filled">filled</option>
+            <option value="lines">lines only</option>
+            <option value="off">off</option>
+          </select></label>
+      </div>
+      <label class="checkline" style="margin-top:8px">
+        <input type="checkbox" id="corner_points" checked>
+        Show individual data points</label>
+      <div class="btnrow" style="margin-top:10px">
+        <button id="updateCornerBtn" class="small">Update corner</button>
+      </div>
+    </fieldset>
+
+    <div class="corner-row" id="cornerRow"></div>
+  </section>
+</main>
+
+<footer id="credits"></footer>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+
+// Default per-dataset colors (blue / orange - a CVD-safe pair); each is
+// editable per run via the Display-options color pickers.
+const DS_COLOR = { A: '#2a78d6', B: '#e8710a' };
+const DS_LIST = ['A', 'B'];
+const INK = '#1f2430';
+
+const ST = { A: freshState(), B: freshState() };
+
+// Loaded models, from /api/config. Radius units are a property of the
+// checkpoint rather than a setting: each model declares its own and the
+// posterior is converted to kpc either way, so the selector reports the
+// convention instead of offering it.
+let MODELS = [];
+function freshState() {
+  return { uploadId: null, fileColumns: [], result: null,
+           preview: null };
+}
+
+const ROLES = [
+  ['ra', 'ra [deg]', true],
+  ['dec', 'dec [deg]', true],
+  ['vr', 'vr [km/s]', true],
+  ['vr_err', 'vr_err [km/s]', true],
+  ['distance', 'distance [kpc]', false],
+  ['dm', 'dist. modulus [mag]', false],
+  ['mem_prob', 'membership prob', false],
+  ['pmra', 'pmra [mas/yr]', false],
+  ['pmdec', 'pmdec [mas/yr]', false],
+  ['feh', '[Fe/H]', false],
+];
+
+// Axis labels for the manual-selection preview panels.
+const PREVIEW_LABELS = {
+  ra: 'RA [deg]', dec: 'Dec [deg]', pmra: 'pmra [mas/yr]',
+  pmdec: 'pmdec [mas/yr]', vr: 'v_los [km/s]', feh: '[Fe/H]',
+};
+const PREVIEW_EXCLUDED_COLOR = '#c9ced6';
+
+// --- Credits (shown in the page footer) ----------------------------------
+// Edit these; every field is optional and an empty one is simply omitted.
+// `citations` entries render as a "please cite" list, each linked to its
+// DOI: { text: 'Author et al. (year), "Title", Journal vol, page',
+//        url: 'https://doi.org/...' }
+const CREDITS = {
+  app: 'dSph posterior explorer',
+  blurb: 'Amortized neural posterior estimation of dwarf spheroidal '
+    + 'dark-matter density profiles',
+  authors: ['Tri Nguyen'],
+  affiliation: '',
+  contact: '',
+  citations: [
+    { text: 'Nguyen et al. (2026), “Dark Matter in Draco and Boötes I: '
+        + 'Hints of a Core in an Ultra-Faint Dwarf from Simulation-Based '
+        + 'Inference”, arXiv:2606.26218',
+      url: 'https://doi.org/10.48550/arXiv.2606.26218' },
+    { text: 'Nguyen et al. (2025), “Trial by FIRE: probing the dark '
+        + 'matter density profile of dwarf galaxies with GraphNPE”, '
+        + 'MNRAS 541, 2707',
+      url: 'https://doi.org/10.1093/mnras/staf1118' },
+    { text: 'Nguyen et al. (2023), “Uncovering dark matter density '
+        + 'profiles in dwarf galaxies with graph neural networks”, '
+        + 'Phys. Rev. D 107, 043015',
+      url: 'https://doi.org/10.1103/PhysRevD.107.043015' },
+  ],
+  repo: '',
+  license: 'MIT',
+  // Methods and data this tool relies on.
+  references: [
+    ['Truncated Sequential NPE',
+     'Deistler, Goncalves & Macke (2022)'],
+    ['Dynamical mass estimator', 'Wolf et al. (2010)'],
+    ['Known-system metadata', 'local_volume_database'],
+  ],
+  software: ['PyTorch', 'zuko', 'PyTorch Lightning', 'PyTorch Geometric',
+             'astropy', 'NumPy', 'SciPy', 'pandas', 'emcee', 'corner.py',
+             'Matplotlib', 'FastAPI', 'Uvicorn', 'Plotly.js'],
+};
+
+function renderCredits() {
+  const c = CREDITS, e = escapeHtml;
+  const line = [];
+  if (c.authors && c.authors.length) {
+    line.push('Built by <b>' + c.authors.map(e).join(', ') + '</b>'
+      + (c.affiliation ? ' · ' + e(c.affiliation) : ''));
+  }
+  if (c.license) line.push(e(c.license) + '-licensed');
+  if (c.repo) {
+    line.push(`<a href="${e(c.repo)}" target="_blank" rel="noopener">`
+      + 'source</a>');
+  }
+  if (c.contact) {
+    const href = c.contact.includes('@') ? 'mailto:' + c.contact
+      : c.contact;
+    line.push(`<a href="${e(href)}" target="_blank" rel="noopener">`
+      + 'contact</a>');
+  }
+  const cite = (c.citations && c.citations.length)
+    ? `<div class="cite"><b>If you use this in published work, please
+         cite:</b>
+       <ul>${c.citations.map((r) => `<li>${e(r.text)}${r.url
+         ? ` · <a href="${e(r.url)}" target="_blank" rel="noopener">`
+           + 'DOI</a>' : ''}</li>`).join('')}</ul></div>`
+    : '';
+  $('credits').innerHTML = `
+    <div class="credits-inner">
+      <div><b>${e(c.app)}</b> — ${e(c.blurb)}</div>
+      <div class="credits-line">${line.join(' · ')}</div>
+      ${cite}
+      <details class="credits-more">
+        <summary>Methods &amp; software this tool builds on</summary>
+        <ul>${c.references.map(([k, v]) =>
+          `<li>${e(k)} — ${e(v)}</li>`).join('')}</ul>
+        <div>Built with ${c.software.map(e).join(' · ')}.</div>
+      </details>
+    </div>`;
+}
+// Scalar quantities to show as kept-vs-excluded histograms (when present).
+const PREVIEW_HIST = ['vr', 'feh', 'pmra', 'pmdec'];
+
+// Profile panels: key, y-axis title, y scale. x (radius) is shared/log.
+const PANELS = [
+  ['rho', 'Density [M☉/kpc³]', 'log'],
+  ['mass', 'Enclosed mass [M☉]', 'log'],
+  ['beta', 'Anisotropy β', 'linear'],
+  ['sigma', 'LOS dispersion [km/s]', 'linear'],
+  ['kappa', 'LOS kurtosis', 'linear'],
+];
+
+// Axis-range control rows: key, label, is-log, canonical Plotly layout
+// key (panel 1 is 'yaxis', not 'yaxis1', in the normalized layout).
+const AXES = [
+  ['r', 'Radius [kpc]', true, 'xaxis'],
+  ['rho', 'Density', true, 'yaxis'],
+  ['mass', 'Enclosed mass', true, 'yaxis2'],
+  ['beta', 'Anisotropy β', false, 'yaxis3'],
+  ['sigma', 'LOS dispersion', false, 'yaxis4'],
+  ['kappa', 'LOS kurtosis', false, 'yaxis5'],
+];
+
+// Rendered plot state: one entry per active dataset, each holding the
+// pre-sorted profile-sample columns so bands recompute instantly.
+const PLOT = { active: [] };
+
+const q = (ds, name) => $(ds + '_' + name);
+// Canonical Plotly *layout* axis key: panel 1 is 'xaxis'/'yaxis' (no
+// trailing 1), panels 2+ get the number. Trace refs stay 'x1'/'y1'.
+const layKey = (prefix, n) => prefix + (n === 1 ? '' : n);
+
+function hexToRgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+}
+
+// User-typed text (the row-filter query) reaches the summary table via
+// innerHTML, so escape it rather than letting it parse as markup.
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = String(s);
+  return div.innerHTML;
+}
+
+function fmt(x, digits = 3) {
+  if (x === null || x === undefined || isNaN(x)) return '';
+  const a = Math.abs(x);
+  return (a !== 0 && (a >= 1e4 || a < 1e-2))
+    ? x.toExponential(2) : Number(x.toPrecision(digits)).toString();
+}
+
+function fmtDuration(sec) {
+  if (sec === null || sec === undefined || isNaN(sec)) return '';
+  if (sec < 60) return sec.toFixed(1) + ' s';
+  const m = Math.floor(sec / 60);
+  return `${m}m ${Math.round(sec - m * 60)}s`;
+}
+
+function setStatus(text, cls) {
+  const el = $('status');
+  el.className = cls || '';
+  el.innerHTML = cls === 'busy'
+    ? '<span class="spinner"></span>' + text : text;
+}
+
+function showError(text) {
+  const el = $('error');
+  el.style.display = text ? 'block' : 'none';
+  el.textContent = text || '';
+}
+
+async function api(path, options) {
+  const resp = await fetch(path, options);
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(body.detail || resp.status + ' ' + resp.statusText);
+  }
+  return body;
+}
+
+// --- per-dataset control panels ------------------------------------------
+function datasetPanelHTML(ds) {
+  const isB = ds === 'B';
+  const sameRow = isB ? `
+    <label class="checkline" style="margin-bottom:8px">
+      <input type="checkbox" id="B_sameAsA">
+      Use the same catalog file &amp; columns as dataset A</label>` : '';
+  return `
+  <div class="dataset" data-ds="${ds}">
+    <h2><span class="swatch" style="background:${DS_COLOR[ds]}"></span>
+      Dataset ${ds}</h2>
+
+    <fieldset id="${ds}_catalogBox">
+      <legend>1 · Catalog</legend>
+      ${sameRow}
+      <div id="${ds}_catalogInner">
+        <p class="hint">One row per star: <b>ra</b>, <b>dec</b> [deg],
+          <b>vr</b>, <b>vr_err</b> [km/s], and <b>distance</b> [kpc] or
+          <b>dm</b> [mag]. Columns are auto-matched by name; re-assign
+          any below after uploading.</p>
+        <input type="file" id="${ds}_fileInput"
+               accept=".csv,.ecsv,.txt,.fits">
+        <div id="${ds}_inspectInfo" class="hint"></div>
+        <div id="${ds}_mappingBox" style="display:none">
+          <p class="hint" style="margin-top:10px"><b>Column assignment</b>
+            (<span class="req">*</span> required)</p>
+          <div class="grid3" id="${ds}_mappingGrid"></div>
+        </div>
+        <div id="${ds}_memProbBox" style="display:none; margin-top:10px">
+          <label class="field"><span>Keep stars with membership
+            probability greater than</span>
+            <input type="number" id="${ds}_mem_prob_min" step="0.01"
+                   value="0.8"></label>
+        </div>
+        <div id="${ds}_flagsBox" style="margin-top:10px"></div>
+      </div>
+
+      <div style="margin-top:12px">
+        <p class="hint" style="margin-bottom:6px"><b>Row filter</b>
+          (optional) — a
+          <a href="https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html"
+             target="_blank" rel="noopener">pandas query</a>
+          expression over your file's columns. Use it to pick one system
+          out of a multi-object catalog.</p>
+        <input type="text" id="${ds}_query"
+               placeholder='e.g. key == "draco_1"'>
+        <p class="hint">Examples:
+          <code>key == "draco_1"</code>,
+          <code>mem_prob &gt; 0.8 and good_star</code>,
+          <code>key in ["draco_1", "bootes_1"]</code>.
+          The projected radius is also available as <code>R_kpc</code> /
+          <code>R_arcmin</code> (e.g. <code>R_kpc &lt; 5</code>) — it is
+          computed from the center below, so it overrides a same-named
+          file column. For a plain radius cut, prefer the R_proj boxes
+          in <b>System</b>. All filters here combine with the cuts
+          above.</p>
+      </div>
+    </fieldset>
+
+    <fieldset id="${ds}_advBox">
+      <legend>1b · Manual star selection (optional)</legend>
+      <p class="hint" style="margin-top:0">Visualize your data and choose
+        which stars to keep before running. Select on the scatter panels
+        with a box / lasso / circle; the histograms below track the kept
+        (colored) vs excluded (grey) distribution of each quantity so you
+        can see the effect of your cut. Panels shown depend on the columns
+        your file has. Use a panel's <b>Enlarge</b> button if it is too
+        small to select precisely. The kept stars feed the run.</p>
+      <div class="btnrow" style="margin:0 0 4px">
+        <button class="secondary small" id="${ds}_loadPreviewBtn"
+                type="button">Load / refresh plots</button>
+        <span class="hint" id="${ds}_previewCount"
+              style="margin:0"></span>
+      </div>
+      <div id="${ds}_previewControls" style="display:none">
+        <div class="toolbar" style="margin:8px 0">
+          <label>Shape:
+            <select id="${ds}_sel_shape"
+                    style="width:auto; min-height:32px">
+              <option value="select" selected>box</option>
+              <option value="lasso">lasso</option>
+              <option value="circle">circle</option>
+            </select></label>
+          <label>On draw:
+            <select id="${ds}_sel_mode"
+                    style="width:auto; min-height:32px">
+              <option value="exclude" selected>exclude selected</option>
+              <option value="include">include selected</option>
+            </select></label>
+          <button class="secondary small" id="${ds}_inclAllBtn"
+                  type="button">Include all</button>
+          <button class="secondary small" id="${ds}_exclAllBtn"
+                  type="button">Exclude all</button>
+        </div>
+        <div id="${ds}_previewPanels" class="preview-row"></div>
+        <p class="hint" style="margin-bottom:0">Grey = excluded from the
+          run. Drop a few outliers with <b>exclude selected</b>, or click
+          <b>Exclude all</b> then <b>include selected</b> to keep only a
+          region (the <b>circle</b> shape is handy for a round clump).
+          Changing the cuts above clears this — reload.</p>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>2 · System</legend>
+      <div class="grid2">
+        <label class="field"><span>Run label</span>
+          <input type="text" id="${ds}_label"
+                 value="${ds === 'A' ? 'dataset_A' : 'dataset_B'}"></label>
+        <label class="field"><span>Known system (optional)</span>
+          <span style="display:flex; gap:8px">
+            <input type="text" id="${ds}_lvdbKey" list="lvdbKeys"
+                   placeholder="e.g. draco_1">
+            <button class="secondary small" id="${ds}_prefillBtn"
+                    type="button" style="white-space:nowrap">
+              Prefill</button>
+          </span>
+        </label>
+      </div>
+      <p class="hint">Prefill copies local_volume_database values into
+        the fields; the run always uses what the fields say. Blank
+        fields fall back to data-driven defaults. The system is
+        auto-detected from your file on upload — override by editing the
+        key and clicking Prefill.</p>
+      <div id="${ds}_detectInfo" class="hint"
+           style="margin-top:-4px"></div>
+      <p class="hint" style="margin:6px 0 0">The model conditions on
+        R_half over a window set by its uncertainty, so at least one
+        error bar is required — a zero-width window admits no posterior
+        draws.</p>
+      <div class="grid3">
+        <label class="field"><span>R_half [kpc]
+            <span class="req">*</span></span>
+          <input type="number" id="${ds}_rhalf_kpc" step="any"></label>
+        <label class="field"><span>R_half −err [kpc]
+            <span class="req">*</span></span>
+          <input type="number" id="${ds}_rhalf_kpc_em" step="any"></label>
+        <label class="field"><span>R_half +err [kpc]
+            <span class="req">*</span></span>
+          <input type="number" id="${ds}_rhalf_kpc_ep" step="any"></label>
+        <label class="field"><span>Center RA [deg]</span>
+          <input type="number" id="${ds}_center_ra_deg" step="any"
+                 placeholder="auto"></label>
+        <label class="field"><span>Center Dec [deg]</span>
+          <input type="number" id="${ds}_center_dec_deg" step="any"
+                 placeholder="auto"></label>
+        <label class="field"><span>Distance [kpc]</span>
+          <input type="number" id="${ds}_distance_kpc" step="any"
+                 placeholder="from column"></label>
+        <label class="field"><span>v_sys [km/s]</span>
+          <input type="number" id="${ds}_vlos_systemic_kms" step="any"
+                 placeholder="auto"></label>
+        <label class="field"><span>pmra [mas/yr]</span>
+          <input type="number" id="${ds}_pmra_masyr" step="any"
+                 placeholder="none"></label>
+        <label class="field"><span>pmdec [mas/yr]</span>
+          <input type="number" id="${ds}_pmdec_masyr" step="any"
+                 placeholder="none"></label>
+        <label class="field"><span>R_proj min</span>
+          <input type="number" id="${ds}_radius_min" step="any"
+                 placeholder="no cut"></label>
+        <label class="field"><span>R_proj max</span>
+          <input type="number" id="${ds}_radius_max" step="any"
+                 placeholder="no cut"></label>
+        <label class="field"><span>R_proj unit</span>
+          <select id="${ds}_radius_unit">
+            <option value="kpc" selected>kpc</option>
+            <option value="arcmin">arcmin</option>
+          </select></label>
+        <label class="field"><span>|v − v_sys| max [km/s]</span>
+          <input type="number" id="${ds}_vlos_abs_max" step="any"
+                 placeholder="no cut"></label>
+        <label class="field"><span>Perspective correction</span>
+          <select id="${ds}_apply_perspective_corr">
+            <option value="1" selected>on (needs both pm)</option>
+            <option value="">off (subtract v_sys only)</option>
+          </select></label>
+      </div>
+      <p class="hint" style="margin-bottom:0">The last rows are cuts and
+        corrections derived from the values above, not columns read from
+        the file: <b>R_proj</b> is each star's projected radius from the
+        center, and <b>|v − v_sys|</b> its velocity offset. Blank means
+        no cut.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>3 · Model &amp; sampling</legend>
+      <label class="field" style="margin-bottom:6px"><span>Model</span>
+        <select id="${ds}_model"></select></label>
+      <p class="hint" id="${ds}_modelNote" style="margin:0 0 10px"></p>
+      <div class="grid2">
+        <label class="field"><span>Posterior samples</span>
+          <input type="number" id="${ds}_n_samples" value="1000"></label>
+        <label class="field"><span>Model batch size</span>
+          <input type="number" id="${ds}_batch_size" value="512"></label>
+        <label class="field"><span>Profile samples</span>
+          <input type="number" id="${ds}_n_profile_samples"
+                 value="500"></label>
+        <label class="field"><span>Radial bins (σ/κ points, plot only)
+          </span>
+          <input type="number" id="${ds}_n_bins" value="4"></label>
+        <label class="field"><span>Inner slope γ min</span>
+          <input type="number" id="${ds}_gamma_min" step="any"
+                 value="0"></label>
+        <label class="field"><span>Inner slope γ max</span>
+          <input type="number" id="${ds}_gamma_max" step="any"
+                 value="2"></label>
+      </div>
+      <p class="hint" style="margin:6px 0 0">The <b>radial bins</b> only
+        set the binned σ_LOS / κ_LOS <i>data points</i> drawn on the
+        profile plots (each bin is a short MCMC fit). The inference is
+        unbinned — this does not affect the posterior.</p>
+      <p class="hint" style="margin-bottom:0">The model's γ prior spans
+        −1 to 2; this defaults to <b>0 to 2</b>, dropping draws with a
+        negative (outward-rising) inner slope. Set the min to −1 to keep
+        the full prior. It is a rejection cut on the fixed number of
+        posterior samples above, so the surviving count (reported after
+        the run) will be smaller.</p>
+    </fieldset>
+  </div>`;
+}
+
+function buildAxisGrid() {
+  $('axisGrid').innerHTML = AXES.map(([key, label]) => `
+    <span>${label}</span>
+    <input type="number" step="any" id="ax_${key}_min">
+    <input type="number" step="any" id="ax_${key}_max">`).join('');
+}
+
+function buildBandRows() {
+  const defs = [[68, true], [90, true], [99, false]];
+  $('bandRows').innerHTML = defs.map(([pct, on], i) => {
+    const k = i + 1;
+    return `<label class="checkline">
+      <input type="checkbox" id="band${k}_on" ${on ? 'checked' : ''}>
+      <input type="number" id="band${k}_pct" value="${pct}" step="1"
+             min="1" max="99"
+             style="width:92px;min-height:30px">
+      <span class="hint" style="margin:0">% central interval</span>
+    </label>`;
+  }).join('');
+}
+
+function buildColorRows() {
+  $('dsColorRows').innerHTML = PLOT.active.map((a) =>
+    `<label class="checkline">
+       <input type="checkbox" id="${a.ds}_show" checked>
+       <input type="color" id="${a.ds}_color" value="${DS_COLOR[a.ds]}">
+       <span>${a.label}
+         <span class="hint" style="margin:0">(dataset ${a.ds})</span></span>
+     </label>`).join('');
+}
+
+// --- column mapping ------------------------------------------------------
+function currentMapping(ds) {
+  const m = {};
+  for (const sel of document.querySelectorAll(
+      `[data-ds="${ds}"][data-role]`)) {
+    m[sel.dataset.role] = sel.value;
+  }
+  return m;
+}
+
+function currentFlags(ds) {
+  const flags = {};
+  for (const sel of document.querySelectorAll(
+      `[data-ds="${ds}"][data-flag]`)) {
+    if (sel.value) flags[sel.dataset.flag] = sel.value === 'true';
+  }
+  return flags;
+}
+
+function buildMappingUI(ds, mapping) {
+  const cols = ST[ds].fileColumns;
+  const options = (selected) =>
+    ['<option value="">(none)</option>']
+      .concat(cols.map((c) => {
+        const esc = c.replace(/"/g, '&quot;');
+        return `<option value="${esc}"${c === selected ? ' selected' : ''}>`
+          + `${c}</option>`;
+      })).join('');
+  q(ds, 'mappingGrid').innerHTML = ROLES.map(([role, title, req]) =>
+    `<label class="field"><span>${title}${req
+      ? ' <span class="req">*</span>' : ''}</span>
+     <select data-ds="${ds}" data-role="${role}">${options(
+        mapping[role] || '')}</select></label>`).join('');
+  q(ds, 'mappingBox').style.display = 'block';
+  for (const sel of document.querySelectorAll(
+      `[data-ds="${ds}"][data-role]`)) {
+    sel.addEventListener('change', updateRunButton);
+  }
+}
+
+// --- readiness -----------------------------------------------------------
+function usingSharedCatalog(ds) {
+  return ds === 'B' && $('B_sameAsA').checked;
+}
+function catalogSource(ds) {
+  return usingSharedCatalog(ds) ? 'A' : ds;
+}
+function readingReady(ds) {
+  const src = catalogSource(ds);
+  if (!ST[src].uploadId) return false;
+  const m = currentMapping(src);
+  return ['ra', 'dec', 'vr', 'vr_err'].every((r) => m[r]);
+}
+function datasetReady(ds) {
+  if (!readingReady(ds)) return false;
+  if (q(ds, 'rhalf_kpc').value === '') return false;
+  const m = currentMapping(catalogSource(ds));
+  return !!(m.distance || m.dm || q(ds, 'distance_kpc').value !== '');
+}
+function updateRunButton() {
+  for (const ds of DS_LIST) {
+    const box = q(ds, 'memProbBox');
+    if (box) box.style.display =
+      currentMapping(ds).mem_prob ? 'block' : 'none';
+    const load = q(ds, 'loadPreviewBtn');
+    if (load) load.disabled = !readingReady(ds);
+  }
+  const compare = $('compareToggle').checked;
+  $('runBtn').disabled =
+    !(datasetReady('A') && (!compare || datasetReady('B')));
+}
+
+// --- upload + inspect ----------------------------------------------------
+// Act on the server's prefill suggestion: fill the system key and
+// prefill the metadata for a confident match, or flag a multi-system
+// file. Always overridable - it only fills fields the user can edit.
+async function applySuggestion(ds, sug) {
+  const info = q(ds, 'detectInfo');
+  info.innerHTML = '';
+  if (!sug) return;
+  if (sug.suggested_key) {
+    q(ds, 'lvdbKey').value = sug.suggested_key;
+    await onPrefill(ds);
+    const how = sug.reason === 'position'
+      ? `matched by sky position (${sug.sep_arcmin}′ from the field `
+        + 'center)'
+      : 'matched by a system-name column';
+    info.innerHTML = `Auto-detected <b>${escapeHtml(sug.suggested_key)}`
+      + `</b> — ${how}, and prefilled the System fields below.`;
+  } else if (sug.reason === 'multi') {
+    info.innerHTML = 'This file contains several known systems ('
+      + sug.candidates.map(escapeHtml).join(', ') + '). Use the Row '
+      + 'filter above to pick one, then set the key and click Prefill.';
+  }
+}
+
+async function onFileChange(ds) {
+  const file = q(ds, 'fileInput').files[0];
+  ST[ds].uploadId = null;
+  ST[ds].fileColumns = [];
+  q(ds, 'inspectInfo').innerHTML = '';
+  q(ds, 'detectInfo').innerHTML = '';
+  q(ds, 'mappingBox').style.display = 'none';
+  q(ds, 'mappingGrid').innerHTML = '';
+  q(ds, 'flagsBox').innerHTML = '';
+  q(ds, 'memProbBox').style.display = 'none';
+  updateRunButton();
+  if (!file) return;
+  setStatus(`Inspecting dataset ${ds} catalog…`, 'busy');
+  showError('');
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const r = await api('/api/inspect', { method: 'POST', body: form });
+    ST[ds].uploadId = r.upload_id;
+    ST[ds].fileColumns = r.columns;
+    q(ds, 'inspectInfo').innerHTML =
+      `${r.n_rows} rows, ${r.columns.length} columns.`;
+    buildMappingUI(ds, r.mapping);
+    if (r.flag_columns.length) {
+      q(ds, 'flagsBox').innerHTML =
+        '<p class="hint"><b>Flag columns</b> (boolean columns found in '
+        + 'the file)</p><div class="grid2">'
+        + r.flag_columns.map((c) => {
+          const esc = c.replace(/"/g, '&quot;');
+          return `<label class="field"><span>${c}</span>
+            <select data-ds="${ds}" data-flag="${esc}">
+              <option value="">ignore</option>
+              <option value="true">require true</option>
+              <option value="false">require false</option>
+            </select></label>`;
+        }).join('') + '</div>';
+    }
+    await applySuggestion(ds, r.suggestion);
+    setStatus(`Dataset ${ds} ready — check the column assignment.`, 'ok');
+  } catch (e) {
+    setStatus(`Dataset ${ds} inspection failed.`, 'err');
+    showError(e.message);
+  }
+  updateRunButton();
+}
+
+async function onPrefill(ds) {
+  const key = q(ds, 'lvdbKey').value.trim();
+  if (!key) return;
+  try {
+    const m = await api('/api/meta/' + encodeURIComponent(key));
+    for (const f of ['center_ra_deg', 'center_dec_deg', 'distance_kpc',
+                     'vlos_systemic_kms', 'pmra_masyr', 'pmdec_masyr',
+                     'rhalf_kpc', 'rhalf_kpc_em', 'rhalf_kpc_ep']) {
+      if (m[f] !== null) q(ds, f).value = m[f];
+    }
+    const lbl = q(ds, 'label');
+    if (!lbl.value || lbl.value === 'dataset_' + ds) lbl.value = key;
+    setStatus(`Dataset ${ds} prefilled from database: ${key}`, 'ok');
+    showError('');
+  } catch (e) {
+    setStatus(`Dataset ${ds} prefill failed.`, 'err');
+    showError(e.message);
+  }
+  updateRunButton();
+}
+
+// --- payloads ------------------------------------------------------------
+function collectPayload(ds) {
+  const src = catalogSource(ds);
+  const ids = ['label', 'rhalf_kpc', 'rhalf_kpc_em', 'rhalf_kpc_ep',
+    'center_ra_deg', 'center_dec_deg', 'distance_kpc',
+    'vlos_systemic_kms', 'pmra_masyr', 'pmdec_masyr',
+    'radius_min', 'radius_max', 'radius_unit', 'vlos_abs_max',
+    'n_samples', 'batch_size', 'n_profile_samples', 'n_bins',
+    'gamma_min', 'gamma_max', 'model',
+    // Read per-dataset despite sitting in the catalog block, which B can
+    // otherwise share wholesale: B reuses A's file, its own filter.
+    'query'];
+  const cols = currentMapping(src);
+  const p = {
+    upload_id: ST[src].uploadId,
+    key: q(ds, 'lvdbKey').value.trim(),
+    apply_perspective_corr:
+      q(ds, 'apply_perspective_corr').value === '1',
+    columns: cols,
+    flags: currentFlags(src),
+    mem_prob_min: cols.mem_prob ? q(src, 'mem_prob_min').value : '',
+  };
+  for (const id of ids) p[id] = q(ds, id).value;
+  const manual = previewKeptIds(ds);
+  if (manual) p.manual_ids = manual;
+  return p;
+}
+
+// --- summary tables ------------------------------------------------------
+// Describe a gamma cut only when it actually narrows the -1..2 prior.
+function gammaCutText(s) {
+  const lo = s.gamma_min, hi = s.gamma_max;
+  const cut = (lo != null && lo > -1) || (hi != null && hi < 2);
+  return cut ? ` (γ∈[${fmt(lo != null ? lo : -1)}, `
+    + `${fmt(hi != null ? hi : 2)}])` : '';
+}
+
+function summaryTable(ds, s) {
+  const i = s.info;
+  const rows = s.params.map((p) =>
+    `<tr><td>${p.name}${p.unit
+        ? ` <span style="color:#667085">[${p.unit}]</span>` : ''}</td>
+     <td>${fmt(p.median)}
+     <span style="color:#667085">+${fmt(p.plus)} / −${fmt(p.minus)}
+     </span></td></tr>`).join('');
+  const modelRow = s.model == null ? '' :
+    `<tr><td>Model</td><td>${s.model}
+       <span style="color:#667085">· trained in
+       ${s.model_radius_units} radii, shown in kpc</span></td></tr>`;
+  const req = s.n_posterior_requested;
+  const kept = s.n_posterior_samples;
+  const gcut = gammaCutText(s);
+  const postCell = (gcut || (req && req !== kept))
+    ? `${kept} of ${req || kept}${gcut}`
+    : `${kept}`;
+  const filters = [];
+  if (i.query) filters.push(`<code>${escapeHtml(i.query)}</code>`);
+  if (i.manual_selection != null) {
+    filters.push(`manual selection (${i.manual_selection} stars kept)`);
+  }
+  if (i.radius_unit) {
+    filters.push(`R ∈ [${i.radius_min != null ? fmt(i.radius_min) : '−∞'},`
+      + ` ${i.radius_max != null ? fmt(i.radius_max) : '∞'}]`
+      + ` ${i.radius_unit}`);
+  }
+  const filterRow = filters.length
+    ? `<tr><td>Row filter</td><td>${filters.join('<br>')}</td></tr>`
+    : '';
+  const wallRow = s.walltime_sec == null ? '' :
+    `<tr><td>Walltime</td><td>${fmtDuration(s.walltime_sec)}
+       <span style="color:#667085">(${fmtDuration(
+         s.walltime_sampling_sec)} sampling the posterior)</span>
+     </td></tr>`;
+  return `<table class="summary">
+      <tr><th colspan="2" style="color:${DS_COLOR[ds]}">
+        ${s.label} &nbsp;(dataset ${ds})</th></tr>
+      <tr><td>Stars used</td>
+          <td>${i.n_after_cuts} of ${i.n_uploaded} uploaded</td></tr>
+      ${filterRow}
+      <tr><td>Center / distance</td>
+          <td>(${fmt(i.center_ra_deg, 6)}, ${fmt(i.center_dec_deg, 6)})
+              deg · ${fmt(i.distance_kpc)} kpc</td></tr>
+      <tr><td>v_sys / persp. corr.</td>
+          <td>${fmt(i.vlos_systemic_kms)} km/s ·
+              ${i.perspective_corr_applied ? 'applied' : 'off'}</td></tr>
+      ${modelRow}
+      <tr><td>Posterior samples</td>
+          <td>${postCell} ·
+              <a href="/api/posterior/${s.job_id}">download CSV</a></td></tr>
+      ${wallRow}
+      <tr><th colspan="2">Posterior (median +84% / −16%)</th></tr>
+      ${rows}
+    </table>`;
+}
+
+// --- client-side percentile bands ----------------------------------------
+// numpy-compatible linear-interpolation percentile of an ascending array.
+function percentileSorted(sorted, p) {
+  const n = sorted.length;
+  if (n === 1) return sorted[0];
+  const rank = (p / 100) * (n - 1);
+  const lo = Math.floor(rank), hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] * (hi - rank) + sorted[hi] * (rank - lo);
+}
+
+// samples: n_draws x n_r  ->  n_r columns each sorted ascending.
+function sortColumns(samples) {
+  const n = samples.length, m = samples[0].length;
+  const cols = [];
+  for (let j = 0; j < m; j++) {
+    const c = new Array(n);
+    for (let i = 0; i < n; i++) c[i] = samples[i][j];
+    c.sort((x, y) => x - y);
+    cols.push(c);
+  }
+  return cols;
+}
+
+function medianOf(cols) { return cols.map((c) => percentileSorted(c, 50)); }
+
+function bandFromPct(cols, pct) {
+  const lo = (100 - pct) / 2, hi = 100 - lo;
+  return {
+    lo: cols.map((c) => percentileSorted(c, lo)),
+    hi: cols.map((c) => percentileSorted(c, hi)),
+  };
+}
+
+// --- plot markers (binned data, Wolf) ------------------------------------
+function binnedTrace(ds, b, n, color, label) {
+  return {
+    x: b.R, y: b.val, xaxis: 'x' + n, yaxis: 'y' + n,
+    mode: 'markers', legendgroup: 'ds' + ds, showlegend: false,
+    marker: { color: color, size: 8, symbol: 'circle',
+              line: { color: '#fff', width: 1 } },
+    error_x: { type: 'data', symmetric: false, array: b.R_ep,
+               arrayminus: b.R_em, color: color, thickness: 1.2,
+               width: 0 },
+    error_y: { type: 'data', symmetric: false, array: b.ep,
+               arrayminus: b.em, color: color, thickness: 1.2, width: 3 },
+    hovertemplate: `${label} binned: R=%{x:.3g} kpc · %{y:.4g}`
+      + '<extra></extra>',
+  };
+}
+
+function wolfTraces(ds, w, color, label) {
+  const t = [{
+    x: [w.r_wolf_kpc], y: [w.mass_median], xaxis: 'x2', yaxis: 'y2',
+    mode: 'markers', legendgroup: 'ds' + ds, showlegend: false,
+    marker: { color: color, size: 10, symbol: 'diamond',
+              line: { color: '#fff', width: 1 } },
+    error_y: { type: 'data', symmetric: false, array: [w.mass_ep],
+               arrayminus: [w.mass_em], color: color, thickness: 1.4,
+               width: 4 },
+    hovertemplate: `${label} Wolf mass=%{y:.3g} M☉<extra></extra>`,
+  }];
+  if (w.literature) {
+    const [logm, em, ep] = w.literature;
+    const m = Math.pow(10, logm);
+    t.push({
+      x: [w.r_wolf_kpc], y: [m], xaxis: 'x2', yaxis: 'y2',
+      mode: 'markers', legendgroup: 'ds' + ds, showlegend: false,
+      marker: { color: color, size: 11, symbol: 'square-open',
+                line: { width: 2 } },
+      error_y: { type: 'data', symmetric: false,
+                 array: [Math.pow(10, logm + ep) - m],
+                 arrayminus: [m - Math.pow(10, logm - em)],
+                 color: color, thickness: 1.4, width: 4 },
+      hovertemplate: `${label} Wolf (lit.)=%{y:.3g} M☉<extra></extra>`,
+    });
+  }
+  return t;
+}
+
+// --- display settings + rendering ----------------------------------------
+function displaySettings() {
+  const bands = [];
+  for (let i = 1; i <= 3; i++) {
+    const on = $('band' + i + '_on') && $('band' + i + '_on').checked;
+    const pct = parseFloat($('band' + i + '_pct').value);
+    if (on && pct > 0 && pct < 100) bands.push(pct);
+  }
+  bands.sort((a, b) => b - a);  // widest first (drawn first, faintest)
+  const colors = {}, show = {};
+  for (const a of PLOT.active) {
+    const c = $(a.ds + '_color');
+    const s = $(a.ds + '_show');
+    colors[a.ds] = c ? c.value : DS_COLOR[a.ds];
+    show[a.ds] = s ? s.checked : true;
+  }
+  return {
+    bands,
+    median: $('show_median').checked,
+    binned: $('show_binned').checked,
+    wolf: $('show_wolf').checked,
+    lineWidth: Math.max(0.5, parseFloat($('line_width').value) || 2),
+    baseAlpha: Math.min(0.6, Math.max(0.02,
+      parseFloat($('band_opacity').value) || 0.25)),
+    colors, show,
+  };
+}
+
+function buildTraces(s) {
+  const nBands = s.bands.length;
+  let traces = [];
+  for (const a of PLOT.active) {
+    if (!s.show[a.ds]) continue;
+    const color = s.colors[a.ds];
+    const grp = 'ds' + a.ds;
+    // Stable legend entry per dataset (survives hiding the median line).
+    traces.push({
+      x: [NaN], y: [NaN], xaxis: 'x1', yaxis: 'y1', mode: 'lines',
+      line: { color: color, width: Math.max(2, s.lineWidth) },
+      name: a.label, legendgroup: grp, showlegend: true,
+      hoverinfo: 'skip',
+    });
+    PANELS.forEach(([key], pi) => {
+      const n = pi + 1;
+      const cols = a.sorted[key];
+      const ax = { xaxis: 'x' + n, yaxis: 'y' + n };
+      s.bands.forEach((pct, bi) => {
+        // Narrower (more central) bands sit on top and read as more
+        // opaque; widest (bi=0) is faintest.
+        const fromNarrow = (nBands - 1) - bi;
+        const alpha = s.baseAlpha * Math.pow(0.55, fromNarrow);
+        const b = bandFromPct(cols, pct);
+        traces.push({ x: a.r, y: b.lo, ...ax, mode: 'lines',
+          line: { width: 0 }, hoverinfo: 'skip', showlegend: false,
+          legendgroup: grp });
+        traces.push({ x: a.r, y: b.hi, ...ax, mode: 'lines',
+          fill: 'tonexty', fillcolor: hexToRgba(color, alpha),
+          line: { width: 0 }, hoverinfo: 'skip', showlegend: false,
+          legendgroup: grp });
+      });
+      if (s.median) {
+        traces.push({ x: a.r, y: medianOf(cols), ...ax, mode: 'lines',
+          line: { color: color, width: s.lineWidth }, legendgroup: grp,
+          showlegend: false,
+          hovertemplate: `${a.label}: r=%{x:.3g} kpc · %{y:.4g}`
+            + '<extra></extra>' });
+      }
+    });
+    if (s.binned) {
+      traces.push(binnedTrace(a.ds, a.binned.sigma, 4, color, a.label));
+      traces.push(binnedTrace(a.ds, a.binned.kappa, 5, color, a.label));
+    }
+    if (s.wolf) {
+      traces = traces.concat(wolfTraces(a.ds, a.wolf, color, a.label));
+    }
+  }
+  return traces;
+}
+
+function initialLogRange(key) {
+  let lo = Infinity, hi = -Infinity;
+  for (const a of PLOT.active) {
+    const c = a.sorted[key];
+    lo = Math.min(lo, ...c.map((col) => percentileSorted(col, 16))
+      .filter((v) => v > 0));
+    hi = Math.max(hi, ...c.map((col) => percentileSorted(col, 84)));
+  }
+  return [Math.log10(lo) - 0.4, Math.log10(hi) + 0.4];
+}
+
+// Snapshot the current axis views so a re-render (band toggle, recolor,
+// relayout) keeps the user where they were instead of resetting the
+// zoom. Grabs every x/y panel axis so it works at any grid size.
+function capturedRanges(div) {
+  if (!div || !div._fullLayout) return null;
+  const fl = div._fullLayout, out = {};
+  for (const k of Object.keys(fl)) {
+    if (!/^[xy]axis\d*$/.test(k)) continue;
+    const ax = fl[k];
+    if (ax.autorange) out[k] = { autorange: true };
+    else if (ax.range) out[k] = { range: ax.range.slice() };
+  }
+  return out;
+}
+
+// Panel-arrangement + sizing settings read live from the layout box.
+// There are PANELS.length panels; rows grow to fit the chosen columns.
+function layoutSettings() {
+  const nP = PANELS.length;
+  const cols = Math.max(1, Math.min(nP, parseInt($('lay_cols').value) || 1));
+  const need = Math.ceil(nP / cols);
+  const rows = Math.max(need, parseInt($('lay_rows').value) || need);
+  const w = parseInt($('lay_width').value);
+  const h = parseInt($('lay_height').value);
+  return {
+    rows, cols,
+    // Auto width widens with more columns; auto height ~300px/row.
+    width: (w && w >= 300) ? w
+      : (cols > 1 ? Math.min(1620, cols * 520) : 1040),
+    height: (h && h >= 200) ? h : rows * 300,
+    shareX: $('lay_shareX').checked,
+  };
+}
+
+function buildLayout(s, L, prev) {
+  const shapes = [];
+  if (s.wolf) {
+    for (const a of PLOT.active) {
+      if (!s.show[a.ds]) continue;
+      PANELS.forEach((_, i) => shapes.push({
+        type: 'line', x0: a.wolf.r_wolf_kpc, x1: a.wolf.r_wolf_kpc,
+        xref: 'x' + (i + 1), yref: 'y' + (i + 1) + ' domain',
+        y0: 0, y1: 1,
+        line: { color: hexToRgba(s.colors[a.ds], 0.6), width: 1,
+                dash: 'dot' },
+      }));
+    }
+  }
+  const layout = {
+    grid: { rows: L.rows, columns: L.cols, pattern: 'independent',
+            roworder: 'top to bottom' },
+    width: L.width, height: L.height,
+    margin: { l: 82, r: 20, t: 64, b: 55 },
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+    font: { color: INK, size: 13 }, hovermode: 'x unified',
+    legend: { orientation: 'h', y: 1.025, yanchor: 'bottom', x: 0 },
+    shapes: shapes,
+  };
+  PANELS.forEach(([key, title, scale], i) => {
+    const n = i + 1;
+    const xk = layKey('xaxis', n), yk = layKey('yaxis', n);
+    // Show x tick labels only where nothing sits directly below in the
+    // same grid column (the bottom of each column) when sharing x; with
+    // independent x-axes every panel labels its own.
+    const isColBottom = (i + L.cols) >= PANELS.length;
+    const showX = L.shareX ? isColBottom : true;
+    layout[xk] = {
+      type: 'log', gridcolor: '#eceef2', zeroline: false,
+      showspikes: true, spikemode: 'across', spikethickness: 1,
+      spikecolor: '#98a2b3', spikedash: 'dot',
+      ...(L.shareX && n > 1 ? { matches: 'x' } : {}),
+      ...(showX ? { title: { text: 'Radius [kpc]' } }
+                : { showticklabels: false }),
+    };
+    layout[yk] = {
+      type: scale, gridcolor: '#eceef2', zeroline: false,
+      title: { text: title, font: { size: 13 } },
+    };
+    // With shared x, only the master axis (n=1) carries a range and the
+    // rest follow via `matches`; with independent x, each keeps its own.
+    if (n === 1 || !L.shareX) {
+      applyRange(layout[xk], prev && prev[xk], true, null);
+    }
+    applyRange(layout[yk], prev && prev[yk], scale === 'log',
+               scale === 'log' ? key : null);
+  });
+  return layout;
+}
+
+function applyRange(axis, saved, isLog, logKeyForInitial) {
+  if (saved && saved.autorange) { axis.autorange = true; return; }
+  if (saved && saved.range) { axis.range = saved.range.slice(); return; }
+  if (logKeyForInitial) axis.range = initialLogRange(logKeyForInitial);
+}
+
+let _pending = false;
+function scheduleRender() {
+  if (_pending) return;
+  _pending = true;
+  requestAnimationFrame(() => { _pending = false; renderPlot(); });
+}
+
+function renderPlot() {
+  if (!PLOT.active.length) return;
+  const s = displaySettings();
+  const L = layoutSettings();
+  const div = $('profilesPlot');
+  const prev = capturedRanges(div);
+  const traces = buildTraces(s);
+  const layout = buildLayout(s, L, prev);
+  // Width/height are set explicitly in `layout` (see layoutSettings), so
+  // sizing is deterministic; clear the CSS max-width cap so wide
+  // multi-column layouts aren't clipped.
+  div.style.maxWidth = 'none';
+  div.style.display = 'block';
+  const fname = PLOT.active.map((a) => a.label).join('_vs_')
+    .replace(/\s+/g, '_') + '_profiles';
+  return Plotly.react(div, traces, layout, {
+    responsive: false, displaylogo: false,
+    toImageButtonOptions: { format: 'png', scale: 2, filename: fname },
+  }).then((gd) => syncAxisInputs(gd));
+}
+
+// --- manual axis ranges --------------------------------------------------
+function syncAxisInputs(gd) {
+  const fl = gd._fullLayout;
+  for (const [key, , isLog, layoutKey] of AXES) {
+    const ax = fl[layoutKey];
+    if (!ax || !ax.range) continue;
+    const conv = (v) => isLog ? Math.pow(10, v) : v;
+    $('ax_' + key + '_min').value = fmt(conv(ax.range[0]), 4);
+    $('ax_' + key + '_max').value = fmt(conv(ax.range[1]), 4);
+  }
+}
+
+// With independent x-axes (share-x off), the single Radius control has
+// to drive every panel's x, since `matches` isn't doing it for us.
+function broadcastX(upd) {
+  if ($('lay_shareX').checked) return;
+  for (const suffix of ['.autorange', '.range']) {
+    const v = upd['xaxis' + suffix];
+    if (v === undefined) continue;
+    for (let n = 2; n <= PANELS.length; n++) {
+      upd['xaxis' + n + suffix] = Array.isArray(v) ? v.slice() : v;
+    }
+  }
+}
+
+function applyAxisRanges() {
+  const gd = $('profilesPlot');
+  if (!gd || !gd._fullLayout) return;
+  const fl = gd._fullLayout, upd = {};
+  for (const [key, , isLog, layoutKey] of AXES) {
+    const cur = fl[layoutKey].range;
+    const rawLo = parseFloat($('ax_' + key + '_min').value);
+    const rawHi = parseFloat($('ax_' + key + '_max').value);
+    const conv = (v) => isLog ? Math.log10(v) : v;
+    let a = isNaN(rawLo) ? null : conv(rawLo);
+    let b = isNaN(rawHi) ? null : conv(rawHi);
+    if (a === null && b === null) {
+      upd[layoutKey + '.autorange'] = true;
+      continue;
+    }
+    if (a === null) a = cur[0];
+    if (b === null) b = cur[1];
+    upd[layoutKey + '.autorange'] = false;
+    upd[layoutKey + '.range'] = [a, b];
+  }
+  broadcastX(upd);
+  Plotly.relayout(gd, upd).then((g) => syncAxisInputs(g));
+}
+
+function autoscaleAll() {
+  const gd = $('profilesPlot');
+  if (!gd || !gd._fullLayout) return;
+  const upd = {};
+  for (const [, , , k] of AXES) upd[k + '.autorange'] = true;
+  broadcastX(upd);
+  Plotly.relayout(gd, upd).then((g) => syncAxisInputs(g));
+}
+
+// --- manual star selection (advanced) ------------------------------------
+function collectPreviewPayload(ds) {
+  const src = catalogSource(ds);
+  const cols = currentMapping(src);
+  return {
+    upload_id: ST[src].uploadId,
+    columns: cols,
+    flags: currentFlags(src),
+    mem_prob_min: cols.mem_prob ? q(src, 'mem_prob_min').value : '',
+    query: q(ds, 'query').value.trim(),
+  };
+}
+
+async function loadPreview(ds) {
+  if (!readingReady(ds)) {
+    showError('Assign RA/Dec/vr/vr_err (and upload a file) first.');
+    return;
+  }
+  const btn = q(ds, 'loadPreviewBtn');
+  btn.disabled = true;
+  q(ds, 'previewCount').textContent = 'Loading…';
+  try {
+    const r = await api('/api/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectPreviewPayload(ds)),
+    });
+    if (!r.n) { throw new Error('No stars pass the current cuts.'); }
+    if (!r.pairs.length) {
+      throw new Error('No plottable columns (need at least RA & Dec).');
+    }
+    ST[ds].preview = { active: true, ids: r.ids, cols: r.columns,
+                       pairs: r.pairs, excluded: new Set(), divs: [] };
+    q(ds, 'previewControls').style.display = 'block';
+    renderPreviewPanels(ds);
+    updatePreviewCount(ds);
+    showError('');
+  } catch (e) {
+    q(ds, 'previewCount').textContent = '';
+    showError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Wrap a plot in a panel with an Enlarge/Shrink toggle, returning the
+// inner div that Plotly draws into (and that carries the panel's data).
+function makePreviewPanel(ds, host) {
+  const wrap = document.createElement('div');
+  wrap.className = 'preview-panel';
+  const head = document.createElement('div');
+  head.className = 'preview-head';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'preview-enlarge';
+  btn.textContent = 'Enlarge';
+  const plot = document.createElement('div');
+  head.appendChild(btn);
+  wrap.appendChild(head);
+  wrap.appendChild(plot);
+  host.appendChild(wrap);
+  btn.addEventListener('click', () => {
+    plot._big = !plot._big;
+    btn.textContent = plot._big ? 'Shrink' : 'Enlarge';
+    drawPreviewPanel(ds, plot, true);
+  });
+  return plot;
+}
+
+function renderPreviewPanels(ds) {
+  const pv = ST[ds].preview;
+  const host = q(ds, 'previewPanels');
+  purgePreviewDivs(ds);
+  host.innerHTML = '';
+  pv.divs = [];
+  // 2D scatter panels for the available role pairs.
+  for (const [xr, yr] of pv.pairs) {
+    const xs = [], ys = [], pid = [];
+    for (let i = 0; i < pv.ids.length; i++) {
+      const xv = pv.cols[xr][i], yv = pv.cols[yr][i];
+      if (xv == null || yv == null) continue;
+      xs.push(xv); ys.push(yv); pid.push(pv.ids[i]);
+    }
+    const div = makePreviewPanel(ds, host);
+    div._kind = 'scatter';
+    div._pid = pid; div._xs = xs; div._ys = ys;
+    div._xr = xr; div._yr = yr;
+    drawPreviewPanel(ds, div);
+    pv.divs.push(div);
+  }
+  // 1D histograms of the available scalar quantities.
+  for (const role of PREVIEW_HIST) {
+    if (!(role in pv.cols)) continue;
+    const vals = [], pid = [];
+    for (let i = 0; i < pv.ids.length; i++) {
+      if (pv.cols[role][i] == null) continue;
+      vals.push(pv.cols[role][i]); pid.push(pv.ids[i]);
+    }
+    if (!vals.length) continue;
+    const div = makePreviewPanel(ds, host);
+    div._kind = 'hist';
+    div._role = role; div._vals = vals; div._pid = pid;
+    drawPreviewPanel(ds, div);
+    pv.divs.push(div);
+  }
+}
+
+// Scatter selection shape -> Plotly dragmode. "circle" uses Plotly's
+// drawcircle (a real, visible ellipse); the stars inside it are picked
+// in onPreviewShape. Box/lasso go through plotly_selected.
+function currentDragmode(ds) {
+  const v = (q(ds, 'sel_shape') || {}).value;
+  if (v === 'lasso') return 'lasso';
+  if (v === 'circle') return 'drawcircle';
+  return 'select';
+}
+
+// Panel pixel size; enlarged panels make precise selection easier.
+function previewSize(div) {
+  const big = !!div._big;
+  if (div._kind === 'hist') return big ? [600, 340] : [292, 200];
+  return big ? [600, 500] : [292, 260];
+}
+
+// Draw (or redraw) one panel. Redrawing with newPlot after every
+// selection is deliberate: a box/lasso leaves a select-outline (and a
+// drawn circle leaves a shape) that otherwise blocks the *next* brush on
+// that panel, and only a full rebuild clears it (restyle/react keep it).
+// Prior axis ranges are carried over so a redraw keeps the user's zoom.
+function drawPreviewPanel(ds, div, keepRange) {
+  if (div._kind === 'hist') return drawHistPanel(ds, div, keepRange);
+  const xr = div._xr, yr = div._yr, pv = ST[ds].preview;
+  const xlab = PREVIEW_LABELS[xr], ylab = PREVIEW_LABELS[yr];
+  const colors = div._pid.map((id) => pv.excluded.has(id)
+    ? PREVIEW_EXCLUDED_COLOR : DS_COLOR[ds]);
+  const xaxis = { title: { text: xlab } };
+  const yaxis = { title: { text: ylab } };
+  if (keepRange && div._fullLayout) {
+    xaxis.range = div._fullLayout.xaxis.range.slice();
+    yaxis.range = div._fullLayout.yaxis.range.slice();
+    xaxis.autorange = false; yaxis.autorange = false;
+  } else if (xr === 'ra') {
+    xaxis.autorange = 'reversed';
+  }
+  const [W, H] = previewSize(div);
+  Plotly.newPlot(div, [{
+    type: 'scatter', mode: 'markers', x: div._xs, y: div._ys,
+    customdata: div._pid,
+    marker: { color: colors, size: 6, line: { width: 0 } },
+    hovertemplate: `${xlab}=%{x:.4g}<br>${ylab}=%{y:.4g}`
+      + '<extra></extra>',
+  }], {
+    width: W, height: H, margin: { l: 50, r: 10, t: 10, b: 42 },
+    dragmode: currentDragmode(ds), paper_bgcolor: '#fff',
+    plot_bgcolor: '#fff', font: { size: 11 }, xaxis, yaxis,
+    newshape: { line: { color: DS_COLOR[ds], width: 2 },
+                fillcolor: DS_COLOR[ds], opacity: 0.12 },
+  }, { displaylogo: false, responsive: false,
+       modeBarButtonsToAdd: ['select2d', 'lasso2d', 'drawcircle'] });
+  div.on('plotly_selected', (ev) => onPreviewSelect(ds, ev));
+  div.on('plotly_relayout', () => onPreviewShape(ds, div));
+}
+
+// Histogram panel (visualization only): the kept (colored) distribution
+// over the excluded (grey) one, sharing bins, so the effect of the
+// current selection on each quantity is visible. Plotly histograms don't
+// emit selection events, so cutting is done on the scatter panels - every
+// histogram quantity also appears in one - and the histograms just track
+// it live via recolorPreview's rebuild.
+function drawHistPanel(ds, div, keepRange) {
+  const pv = ST[ds].preview, role = div._role;
+  const lab = PREVIEW_LABELS[role];
+  const keptV = [], exclV = [];
+  for (let i = 0; i < div._vals.length; i++) {
+    (pv.excluded.has(div._pid[i]) ? exclV : keptV).push(div._vals[i]);
+  }
+  let lo = Infinity, hi = -Infinity;
+  for (const v of div._vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const size = hi > lo ? (hi - lo) / 28 : 1;
+  const xbins = { start: lo, end: hi + size, size };
+  const trace = (vals, color) => ({
+    type: 'histogram', x: vals, xbins, marker: { color }, opacity: 0.8,
+  });
+  const xaxis = { title: { text: lab } };
+  if (keepRange && div._fullLayout) {
+    xaxis.range = div._fullLayout.xaxis.range.slice();
+    xaxis.autorange = false;
+  }
+  const [W, H] = previewSize(div);
+  Plotly.newPlot(div, [
+    trace(exclV, PREVIEW_EXCLUDED_COLOR),
+    trace(keptV, DS_COLOR[ds]),
+  ], {
+    width: W, height: H, margin: { l: 44, r: 10, t: 10, b: 42 },
+    barmode: 'overlay', dragmode: 'zoom', showlegend: false,
+    paper_bgcolor: '#fff', plot_bgcolor: '#fff', font: { size: 11 },
+    xaxis, yaxis: { title: { text: 'count' } },
+  }, { displaylogo: false, responsive: false });
+}
+
+// Box / lasso selection (scatter panels).
+function onPreviewSelect(ds, ev) {
+  const pv = ST[ds].preview;
+  if (!pv || !ev || !ev.points || !ev.points.length) return;
+  const exclude = q(ds, 'sel_mode').value === 'exclude';
+  for (const p of ev.points) {
+    if (exclude) pv.excluded.add(p.customdata);
+    else pv.excluded.delete(p.customdata);
+  }
+  recolorPreview(ds);
+  updatePreviewCount(ds);
+}
+
+// Circle (drawcircle) selection: pick the stars inside the drawn
+// ellipse. Fires via plotly_relayout; a relayout with no new circle
+// shape (zoom, pan, autorange, our own rebuild) is ignored.
+function onPreviewShape(ds, div) {
+  const pv = ST[ds].preview;
+  if (!pv || div._kind !== 'scatter') return;
+  const shapes = (div.layout && div.layout.shapes) || [];
+  const s = shapes[shapes.length - 1];
+  if (!s || s.type !== 'circle') return;
+  const cx = (s.x0 + s.x1) / 2, cy = (s.y0 + s.y1) / 2;
+  const ax = Math.abs(s.x1 - s.x0) / 2, ay = Math.abs(s.y1 - s.y0) / 2;
+  if (!(ax > 0) || !(ay > 0)) return;
+  const exclude = q(ds, 'sel_mode').value === 'exclude';
+  for (let i = 0; i < div._pid.length; i++) {
+    const nx = (div._xs[i] - cx) / ax, ny = (div._ys[i] - cy) / ay;
+    if (nx * nx + ny * ny <= 1) {
+      if (exclude) pv.excluded.add(div._pid[i]);
+      else pv.excluded.delete(div._pid[i]);
+    }
+  }
+  recolorPreview(ds);   // rebuild also drops the drawn circle
+  updatePreviewCount(ds);
+}
+
+// Recolor every panel to reflect the excluded set. Rebuilds (rather than
+// restyles) so the just-drawn selection/shape is cleared and the next
+// brush works; keeps each panel's current zoom.
+function recolorPreview(ds) {
+  for (const div of ST[ds].preview.divs) drawPreviewPanel(ds, div, true);
+}
+
+function updatePreviewCount(ds) {
+  const pv = ST[ds].preview;
+  const kept = pv.ids.length - pv.excluded.size;
+  q(ds, 'previewCount').textContent =
+    `Keeping ${kept} of ${pv.ids.length} stars`;
+}
+
+function previewKeptIds(ds) {
+  const pv = ST[ds].preview;
+  if (!pv || !pv.active || pv.excluded.size === 0) return null;
+  return pv.ids.filter((id) => !pv.excluded.has(id));
+}
+
+function purgePreviewDivs(ds) {
+  const pv = ST[ds].preview;
+  if (pv && pv.divs) for (const div of pv.divs) Plotly.purge(div);
+}
+
+// The plots reflect the flag/membership/query cuts, so any change to
+// those makes a loaded selection stale - clear it and prompt a reload.
+function invalidatePreview(ds) {
+  if (!ST[ds].preview) return;
+  purgePreviewDivs(ds);
+  ST[ds].preview = null;
+  q(ds, 'previewControls').style.display = 'none';
+  q(ds, 'previewPanels').innerHTML = '';
+  q(ds, 'previewCount').textContent = 'Cuts changed — reload the plots.';
+}
+
+// --- copy plot images to clipboard ---------------------------------------
+// Briefly show a status on the button (e.g. "Copied!") then restore it.
+function flashButton(btn, msg) {
+  if (!btn || btn.dataset.busy) return;
+  btn.dataset.busy = '1';
+  const old = btn.textContent;
+  btn.textContent = msg;
+  btn.disabled = true;
+  setTimeout(() => {
+    btn.textContent = old;
+    btn.disabled = false;
+    delete btn.dataset.busy;
+  }, 1400);
+}
+
+async function copyPngBlob(blob, btn) {
+  // Clipboard image write needs a secure context (https or localhost)
+  // and ClipboardItem support; fall back to a clear message otherwise.
+  try {
+    if (!navigator.clipboard || !window.ClipboardItem) {
+      throw new Error('Clipboard image API unavailable in this browser '
+        + '/ context.');
+    }
+    await navigator.clipboard.write(
+      [new ClipboardItem({ 'image/png': blob })]);
+    flashButton(btn, 'Copied!');
+  } catch (e) {
+    flashButton(btn, 'Copy failed');
+    showError('Could not copy the image to the clipboard: ' + e.message
+      + '\nThis needs a secure context (https, or http://localhost) and '
+      + 'a supporting browser. Use the plot’s camera button or a '
+      + 'right-click “Copy image” instead.');
+  }
+}
+
+async function copyProfilePlot(btn) {
+  const gd = $('profilesPlot');
+  if (!gd || !gd._fullLayout) return;
+  try {
+    const url = await Plotly.toImage(gd, {
+      format: 'png', scale: 2,
+      width: gd._fullLayout.width, height: gd._fullLayout.height });
+    await copyPngBlob(await (await fetch(url)).blob(), btn);
+  } catch (e) {
+    flashButton(btn, 'Copy failed');
+    showError('Could not render the plot image: ' + e.message);
+  }
+}
+
+async function copyCornerImage(ds, btn) {
+  const img = document.querySelector(`#cornerRow img[data-ds="${ds}"]`);
+  if (!img) return;
+  // The corner src is a data: URL; fetch turns it back into a blob.
+  await copyPngBlob(await (await fetch(img.src)).blob(), btn);
+}
+
+// --- corner plot ---------------------------------------------------------
+function cornerOptions() {
+  const smooth = parseFloat($('corner_smooth').value);
+  return {
+    smooth: isNaN(smooth) || smooth <= 0 ? null : smooth,
+    bins: Math.max(5, parseInt($('corner_bins').value) || 20),
+    contours: $('corner_contours').value,
+    plot_datapoints: $('corner_points').checked,
+  };
+}
+
+function applyCornerVisibility() {
+  $('cornerRow').style.display = $('corner_show').checked ? '' : 'none';
+}
+
+async function updateCorners() {
+  const btn = $('updateCornerBtn');
+  btn.disabled = true;
+  const opts = cornerOptions();
+  try {
+    for (const a of PLOT.active) {
+      const jobId = ST[a.ds].result.job_id;
+      const r = await api('/api/corner/' + jobId, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(opts),
+      });
+      const img = document.querySelector(`#cornerRow img[data-ds="${a.ds}"]`);
+      if (img) img.src = r.corner_png;
+    }
+    setStatus('Corner updated.', 'ok');
+  } catch (e) {
+    setStatus('Corner update failed.', 'err');
+    showError(e.message);
+  }
+  btn.disabled = false;
+}
+
+// --- run -----------------------------------------------------------------
+async function runOne(ds) {
+  return api('/api/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(collectPayload(ds)),
+  });
+}
+
+async function onRun() {
+  const compare = $('compareToggle').checked;
+  const datasets = compare ? ['A', 'B'] : ['A'];
+  showError('');
+  $('runBtn').disabled = true;
+  try {
+    const active = [];
+    for (const ds of datasets) {
+      setStatus(compare
+        ? `Running dataset ${ds} — this can take a few minutes…`
+        : 'Running inference — this can take a few minutes…', 'busy');
+      const r = await runOne(ds);
+      ST[ds].result = r;
+      const pr = r.profiles;
+      const sorted = {};
+      for (const key of Object.keys(pr.samples)) {
+        sorted[key] = sortColumns(pr.samples[key]);
+      }
+      active.push({ ds, label: r.summary.label, r: pr.r_kpc,
+        sorted: sorted, binned: pr.binned, wolf: pr.wolf });
+    }
+    PLOT.active = active;
+
+    $('summaryRow').innerHTML = datasets.map((ds) =>
+      summaryTable(ds, { ...ST[ds].result.summary,
+        job_id: ST[ds].result.job_id })).join('');
+    buildColorRows();
+    $('displayBox').style.display = 'block';
+    $('layoutBox').style.display = 'block';
+    $('axisBox').style.display = 'block';
+    $('cornerBox').style.display = 'block';
+    $('plotToolbar').style.display = 'flex';
+    $('plotCaption').style.display = 'block';
+    await renderPlot();
+    $('cornerRow').innerHTML = datasets.map((ds) =>
+      `<div class="corner-col"><h3 style="color:${DS_COLOR[ds]}">
+         ${ST[ds].result.summary.label} — posterior corner
+         <button class="secondary small copy-corner" data-ds="${ds}"
+                 style="margin-left:8px">Copy image</button></h3>
+       <img src="${ST[ds].result.corner_png}" alt="corner ${ds}"
+            data-ds="${ds}"></div>`)
+      .join('');
+    applyCornerVisibility();
+    setStatus('Done. Tune bands/colors and axis ranges below; the '
+      + 'camera icon saves a PNG.', 'ok');
+  } catch (e) {
+    setStatus('Run failed.', 'err');
+    showError(e.message);
+  }
+  updateRunButton();
+}
+
+// --- wiring --------------------------------------------------------------
+function showModelNote(ds) {
+  const m = MODELS.find((x) => x.name === q(ds, 'model').value);
+  q(ds, 'modelNote').textContent = m
+    ? `radii: ${m.radius_units}` + (m.note ? ` — ${m.note}` : '') : '';
+}
+
+function wireDataset(ds) {
+  q(ds, 'model').addEventListener('change', () => showModelNote(ds));
+  q(ds, 'fileInput').addEventListener('change', () => onFileChange(ds));
+  q(ds, 'prefillBtn').addEventListener('click', () => onPrefill(ds));
+  q(ds, 'rhalf_kpc').addEventListener('input', updateRunButton);
+  q(ds, 'distance_kpc').addEventListener('input', updateRunButton);
+
+  // Manual-selection panel.
+  q(ds, 'loadPreviewBtn').addEventListener('click', () => loadPreview(ds));
+  q(ds, 'inclAllBtn').addEventListener('click', () => {
+    if (!ST[ds].preview) return;
+    ST[ds].preview.excluded.clear();
+    recolorPreview(ds); updatePreviewCount(ds);
+  });
+  q(ds, 'exclAllBtn').addEventListener('click', () => {
+    if (!ST[ds].preview) return;
+    ST[ds].preview.excluded = new Set(ST[ds].preview.ids);
+    recolorPreview(ds); updatePreviewCount(ds);
+  });
+  q(ds, 'sel_shape').addEventListener('change', () => {
+    const pv = ST[ds].preview;
+    if (!pv) return;
+    const dm = currentDragmode(ds);
+    for (const div of pv.divs) {
+      if (div._kind === 'scatter') Plotly.relayout(div, { dragmode: dm });
+    }
+  });
+  // A loaded selection is only valid for the cuts it was drawn under.
+  for (const ev of ['change', 'input']) {
+    q(ds, 'catalogBox').addEventListener(ev, () => invalidatePreview(ds));
+  }
+}
+
+function initDatasets() {
+  $('datasets').innerHTML =
+    DS_LIST.map((ds) => datasetPanelHTML(ds)).join('');
+  DS_LIST.forEach(wireDataset);
+  buildAxisGrid();
+  buildBandRows();
+
+  const panelB = document.querySelector('.dataset[data-ds="B"]');
+  panelB.style.display = 'none';
+  $('compareToggle').addEventListener('change', () => {
+    panelB.style.display = $('compareToggle').checked ? '' : 'none';
+    updateRunButton();
+  });
+  $('B_sameAsA').addEventListener('change', () => {
+    $('B_catalogInner').style.display =
+      $('B_sameAsA').checked ? 'none' : '';
+    updateRunButton();
+  });
+
+  $('runBtn').addEventListener('click', onRun);
+  $('applyAxisBtn').addEventListener('click', applyAxisRanges);
+  $('autoscaleBtn').addEventListener('click', autoscaleAll);
+  // Any display-option or panel-layout change re-renders the profile
+  // plot (throttled to one per animation frame).
+  for (const ev of ['input', 'change']) {
+    $('displayBox').addEventListener(ev, scheduleRender);
+    $('layoutBox').addEventListener(ev, scheduleRender);
+  }
+  // Corner styling hits the backend, so it applies on an explicit
+  // button; only show/hide is instant.
+  $('corner_show').addEventListener('change', applyCornerVisibility);
+  $('updateCornerBtn').addEventListener('click', updateCorners);
+
+  // Copy plot images to the clipboard. The corner row is rebuilt each
+  // run, so its buttons are handled by delegation.
+  $('copyPlotBtn').addEventListener('click',
+    (e) => copyProfilePlot(e.currentTarget));
+  $('cornerRow').addEventListener('click', (e) => {
+    const btn = e.target.closest('.copy-corner');
+    if (btn) copyCornerImage(btn.dataset.ds, btn);
+  });
+}
+
+// --- startup -------------------------------------------------------------
+(async () => {
+  initDatasets();
+  renderCredits();
+  try {
+    const cfg = await api('/api/config');
+    MODELS = cfg.models;
+    $('serverInfo').textContent =
+      `${MODELS.length} model${MODELS.length === 1 ? '' : 's'} loaded` +
+      ` · device: ${cfg.device} · output in kpc`;
+    for (const ds of ['A', 'B']) {
+      q(ds, 'model').innerHTML = MODELS.map((m) =>
+        `<option value="${m.name}"${m.name === cfg.default_model
+          ? ' selected' : ''}>${m.name}</option>`).join('');
+      q(ds, 'model').disabled = MODELS.length < 2;
+      showModelNote(ds);
+    }
+    const sys = await api('/api/systems');
+    $('lvdbKeys').innerHTML =
+      sys.keys.map((k) => `<option value="${k}">`).join('');
+  } catch (e) {
+    $('serverInfo').textContent = 'server error: ' + e.message;
+  }
+})();
+</script>
+</body>
+</html>

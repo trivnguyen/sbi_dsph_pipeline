@@ -1,0 +1,573 @@
+"""Build a self-contained, distributable copy of the web app.
+
+Assembles everything the app needs into one directory - the app itself,
+the trained model, and private copies of the `tsnpe`, `jgnn` (models +
+transforms only), and `dsph_analysis` packages - so the result can be
+copied to any machine, pip-installed from its requirements.txt (or
+built with its Dockerfile), and launched with no access to this repo,
+the cluster filesystem, or the network:
+
+    python package.py --model 8p_priorA --model 8p_v3
+    cd dist/dsph_explorer
+    pip install -r requirements.txt
+    python app.py
+
+Bundle as many models as you want to hand over: they land in
+`models/<name>/`, and the bundled app offers them in a dropdown exactly
+as the repo-mode server does. A checkpoint is ~11 MB, so a second one
+is cheap next to the ~50 MB of vendored packages.
+
+A model's radius convention is the one thing about a checkpoint that no
+file in it records (see inference.build_prior). `--model` takes it from
+`npe_inference/configs/models.py`, where it is declared once; a
+checkpoint given by `--checkpoint-dir` is registered nowhere, so
+`--radius-units` must assert it. Either way it is written into
+`models/<name>/model_spec.json` and read back at launch, so the bundle
+never asks its users.
+
+Usage:
+    python package.py --model NAME [--model NAME ...] [--out DIR]
+    python package.py --checkpoint-dir DIR --radius-units {kpc,rstar}
+                      [--name N] [--checkpoint-filename F]
+                      [--note TEXT] [--out DIR]
+"""
+
+import argparse
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+import numpy as np
+
+_WEBAPP_DIR = Path(__file__).resolve().parent
+
+# The `tsnpe` package to vendor comes from the checkout this file
+# sits in, overridable exactly as in app_paths.py and
+# npe_inference/npe_infer/paths.py.
+_PIPELINE_DIR = Path(os.environ.get(
+    'SBI_DSPH_PIPELINE_DIR', str(_WEBAPP_DIR.parent)))
+_REPO_TSNPE = _PIPELINE_DIR / 'tsnpe' / 'tsnpe'
+
+_APP_FILES = ('app.py', 'app_paths.py', 'inference.py',
+              'user_catalog.py')
+_TSNPE_MODULES = ('__init__.py', 'target.py', 'prior.py',
+                  'model_io.py', 'proposal.py')
+
+# jgnn's real __init__ also imports callbacks/datasets/training/utils,
+# which drag in wandb/h5py/tarp - none of it needed at inference time.
+_JGNN_INIT = '''"""Jeans GNN package (webapp bundle: models + transforms only).
+
+Trimmed by webapp/package.py from the full jgnn package - training,
+callbacks, and dataset modules (and their wandb/h5py dependencies) are
+not needed to run the pretrained model.
+"""
+
+from . import models
+from . import transforms
+
+__all__ = ['models', 'transforms']
+'''
+
+_REQUIREMENTS = '''\
+# Core inference stack. torch/torch-cluster often need a
+# platform-specific install first - see README.md.
+torch>=2.4
+# Pinned: newer torch-geometric releases changed knn_graph's fallback
+# and require pyg-lib - stick to the version this model was actually
+# trained/validated against.
+torch-geometric==2.7.0
+torch-cluster>=1.6.3
+pytorch-lightning>=2.4
+zuko>=1.3
+ml-collections>=1.0
+numpy>=1.26
+scipy>=1.13
+pandas>=2.2
+astropy>=6.0
+emcee>=3.1
+corner>=2.2
+matplotlib>=3.8
+tqdm>=4.66
+# Web server.
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+'''
+
+_DOCKERFILE = '''\
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# CPU-only torch, then torch-cluster from the matching PyG wheel index
+# (adjust the torch version in the URL if you change the pin), then the
+# rest. For GPU serving, swap in the CUDA wheel indices instead.
+COPY requirements.txt .
+RUN pip install --no-cache-dir torch==2.9.* \\
+        --index-url https://download.pytorch.org/whl/cpu \\
+    && pip install --no-cache-dir torch-cluster \\
+        -f https://data.pyg.org/whl/torch-2.9.0+cpu.html \\
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8799
+CMD ["python", "app.py", "--host", "0.0.0.0", "--port", "8799"]
+'''
+
+_BUNDLE_README = '''\
+# dSph posterior explorer (self-contained bundle)
+
+Amortized dwarf-spheroidal density-profile inference in the browser:
+upload a kinematic catalog, fill in the system metadata, and get an
+interactive profile explorer (density, enclosed mass, anisotropy, LOS
+dispersion, LOS kurtosis), the posterior corner plot, a Wolf-mass
+sanity check, and the raw posterior samples as CSV.
+
+Everything is local to this directory: the app, the trained models
+(`models/`), and private copies of the analysis packages it needs. No
+repository access or network access is required at runtime.
+
+If more than one model is bundled, pick between them in the dropdown
+at the top of step 3; posterior output is in kpc whichever you pick.
+
+## Run
+
+```bash
+pip install -r requirements.txt   # see note below for torch
+python app.py                     # http://localhost:8799
+```
+
+`torch` and `torch-cluster` sometimes need a platform-specific install
+before `pip install -r requirements.txt` - e.g. CPU-only:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install torch-cluster -f https://data.pyg.org/whl/torch-2.9.0+cpu.html
+```
+
+Or build the Docker image (CPU-only by default):
+
+```bash
+docker build -t dsph-explorer .
+docker run -p 8799:8799 dsph-explorer
+```
+
+A GPU is optional - on CPU a typical run (1000 posterior samples, 500
+profile samples) takes a few minutes instead of ~20 s.
+
+Options: `python app.py --help` (port, device, model directory,
+profile-worker count).
+
+There is no authentication - only expose the port to people you would
+let run jobs on the host machine.
+
+## Data format
+
+One row per star; CSV, ECSV, or FITS table. Required columns
+(case-insensitive, common alias spellings accepted, and every
+assignment can be corrected by hand in the UI after upload):
+
+| column     | unit | meaning                                    |
+|------------|------|--------------------------------------------|
+| `ra`       | deg  | right ascension (ICRS)                     |
+| `dec`      | deg  | declination (ICRS)                         |
+| `vr`       | km/s | heliocentric line-of-sight velocity        |
+| `vr_err`   | km/s | its 1-sigma uncertainty                    |
+| `distance` | kpc  | per-star distance, **or** `dm` [mag]; the
+                     median sets the system distance (or type the
+                     distance into the form instead). |
+
+Optional, auto-detected: a membership-probability column (threshold
+cut in the UI) and arbitrarily-named boolean flag columns (each can be
+ignored, required true, or required false).
+
+`example_catalog.csv` is a small synthetic file in the right format -
+try it with R_half = 0.2 kpc.
+
+## Selecting rows
+
+Two more filters are available, and combine with everything above (all
+cuts are ANDed):
+
+- **Row filter**, under the upload box - a
+  [pandas query](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html)
+  expression over your file's columns, e.g. `key == "draco_1"`,
+  `mem_prob > 0.8 and good_star`, `key in ["draco_1", "bootes_1"]`.
+  One file holding several systems is the main use: the filter picks
+  the one to fit, and the center, distance, and systemic velocity are
+  then measured from just those stars. In compare mode dataset B can
+  reuse A's file with a different filter, so A vs B can be two systems
+  out of one catalog.
+- **R_proj min/max**, in the System section next to `|v - v_sys| max` -
+  a cut on each star's projected radius from the center, in kpc or
+  arcmin. It sits there rather than with the catalog because, like the
+  velocity cut, it is computed from the system values above it rather
+  than read from a column.
+
+The projected radius is also available to the row filter as `R_kpc` and
+`R_arcmin` (e.g. `R_kpc < 5`). These are computed from the center, so
+they replace same-named columns in your file.
+
+### Manual selection (optional)
+
+Section **1b** plots the stars that pass the cuts above and lets you
+pick which to keep by drawing on the figures. It shows scatter panels
+(RA-Dec always, plus pmra-pmdec and v_los-[Fe/H] when those columns are
+present) and histograms of each available quantity that track the kept
+(colored) vs excluded (grey) split live, so you can see the effect of a
+cut before running.
+
+Select on the scatter panels with a **box**, **lasso**, or **circle**
+(pick the shape from the dropdown, then drag). Draw with **exclude
+selected** to drop outliers, or **Exclude all** then **include
+selected** to keep only a region; grey points are excluded, and
+selections combine across all panels. Each panel has an **Enlarge**
+button that grows it for easier, more precise selection. Click **Load /
+refresh plots** to (re)build the panels; changing any cut above clears
+the selection. The kept stars are passed to the run as an explicit list.
+
+## System metadata
+
+The half-light radius **R_half [kpc]** is required - the model
+conditions on it. Center, systemic velocity, and distance default to
+data-driven medians when left blank; proper motions are only needed
+for the perspective-rotation correction. Systems in the bundled
+local_volume_database snapshot can be prefilled by key.
+
+On upload the app tries to **auto-detect** which known system your
+catalog is and prefills the metadata for you - by a system-name column
+if present (e.g. a `key` column holding `draco_1`), otherwise by
+matching the field's sky position to the nearest known center. It's
+always overridable: edit the key and click Prefill, or just edit the
+fields. A file spanning several known systems isn't auto-picked; use
+the row filter to choose one.
+
+## Adding or swapping a model
+
+Each subdirectory of `models/` is one entry in the dropdown, named
+after the directory. Add another by copying in any checkpoint trained
+by this pipeline - the Lightning `.ckpt` plus the
+`config_snapshot.json` written next to it at training time (if the
+directory holds exactly one `.ckpt`, any file name works) - and
+writing a `model_spec.json` beside it:
+
+```json
+{"radius_units": "rstar", "note": "priorB / 2M sims"}
+```
+
+`radius_units` says which convention that model predicts radii in:
+`"kpc"` for a priorA model (8p_ZhaoPlumCOM) or `"rstar"` for a priorB
+one (8p_ZhaoPlumCOM_v3). Nothing in a checkpoint records this, and the
+wrong value shifts the DM scale radius by a factor of the half-light
+radius while still producing plausible-looking profiles, so the app
+refuses to start a model without it. It is per-model and not a
+user-facing setting: whichever model runs, its output is converted to
+kpc before you see it.
+
+## Deploying on a website
+
+This is a Python web service, so it needs a host that can run a
+process (a VPS, lab server, or container platform) - it cannot run on
+static-only hosting (GitHub Pages, plain shared hosting). A 1-2 CPU /
+2 GB RAM box is enough.
+
+Typical setup - run the app as a service and put your web server in
+front of it:
+
+```ini
+# /etc/systemd/system/dsph-explorer.service
+[Unit]
+Description=dSph posterior explorer
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/dsph_explorer
+ExecStart=/opt/dsph_explorer/.venv/bin/python app.py \\
+    --host 127.0.0.1 --port 8799 --output-dir /opt/dsph_explorer/runs
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```nginx
+# nginx: serve it under your domain (add HTTPS with certbot)
+location /dsph/ {
+    proxy_pass http://127.0.0.1:8799/;
+    proxy_read_timeout 600s;   # runs can take minutes on CPU
+    client_max_body_size 50m;  # catalog uploads
+    # optional gate, since the app has no auth of its own:
+    # auth_basic "dsph explorer";
+    # auth_basic_user_file /etc/nginx/.htpasswd;
+}
+```
+
+With `--host 127.0.0.1` the app is only reachable through the proxy.
+Anyone who can reach the page can submit runs on your machine, so add
+the basic-auth lines (or equivalent) if the URL is public.
+
+## Credits
+
+**dSph posterior explorer** - built by Tri Nguyen. MIT licensed.
+
+If you use this in published work, please cite:
+
+- Nguyen et al. (2026), "Dark Matter in Draco and Bootes I: Hints of a
+  Core in an Ultra-Faint Dwarf from Simulation-Based Inference",
+  arXiv:2606.26218 - <https://doi.org/10.48550/arXiv.2606.26218>
+- Nguyen et al. (2025), "Trial by FIRE: probing the dark matter density
+  profile of dwarf galaxies with GraphNPE", MNRAS 541, 2707 -
+  <https://doi.org/10.1093/mnras/staf1118>
+- Nguyen et al. (2023), "Uncovering dark matter density profiles in
+  dwarf galaxies with graph neural networks", Phys. Rev. D 107, 043015 -
+  <https://doi.org/10.1103/PhysRevD.107.043015>
+
+Methods and data this tool builds on:
+
+- Truncated Sequential NPE - Deistler, Goncalves & Macke (2022)
+- Dynamical mass estimator - Wolf et al. (2010)
+- Known-system metadata - local_volume_database
+
+Built with PyTorch, zuko, PyTorch Lightning, PyTorch Geometric, astropy,
+NumPy, SciPy, pandas, emcee, corner.py, Matplotlib, FastAPI, Uvicorn,
+and Plotly.js.
+
+The same credits appear in the app's page footer; edit the `CREDITS`
+block near the top of `static/index.html` to change them.
+'''
+
+
+def _example_catalog(path: Path) -> None:
+    """Write a small synthetic catalog in the documented format."""
+    rng = np.random.default_rng(42)
+    n = 250
+    ra = 260.05 + rng.normal(0, 0.08, n)
+    dec = 57.9 + rng.normal(0, 0.08, n)
+    dist = rng.normal(80.0, 0.5, n)
+    vr = -290.0 + rng.normal(0, 9.0, n)
+    vr_err = np.abs(rng.normal(2.0, 0.5, n)) + 0.5
+    mem_prob = np.clip(rng.uniform(0.5, 1.0, n), 0, 1)
+    good = rng.random(n) > 0.05
+    header = 'ra,dec,distance,vr,vr_err,mem_prob,good_star\n'
+    rows = ''.join(
+        f'{ra[i]:.6f},{dec[i]:.6f},{dist[i]:.2f},{vr[i]:.3f},'
+        f'{vr_err[i]:.3f},{mem_prob[i]:.3f},{str(good[i])}\n'
+        for i in range(n))
+    path.write_text(header + rows)
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    shutil.copytree(
+        src, dst, ignore=shutil.ignore_patterns(
+            '__pycache__', '*.pyc', '.git', '.git*', '*.ipynb'))
+
+
+def _copy_model(spec: dict, out: Path, inference) -> None:
+    """Copy one model into `out/models/<name>/` with its spec file.
+
+    Args:
+        spec: `{name, model_dir, checkpoint, radius_units, note}`.
+        out: The bundle directory.
+        inference: The webapp's inference module (imported by build,
+            which puts the webapp directory on sys.path first).
+
+    Raises:
+        FileNotFoundError: If the checkpoint or its config snapshot is
+            missing.
+    """
+    checkpoint_path = spec['model_dir'] / spec['checkpoint']
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f'No checkpoint at {checkpoint_path}')
+    snapshot = inference._find_config_snapshot(checkpoint_path)
+    if snapshot is None:
+        raise FileNotFoundError(
+            f'No config_snapshot.json found near {checkpoint_path}')
+
+    model_dir = out / 'models' / spec['name']
+    model_dir.mkdir(parents=True)
+    shutil.copy(checkpoint_path, model_dir / 'model.ckpt')
+    shutil.copy(snapshot, model_dir / 'config_snapshot.json')
+    # What the checkpoint cannot say about itself. app.py reads this
+    # instead of requiring --radius-units from the bundle's users.
+    (model_dir / 'model_spec.json').write_text(json.dumps({
+        'name': spec['name'],
+        'radius_units': spec['radius_units'],
+        'source_checkpoint': str(checkpoint_path),
+        'note': spec['note'],
+    }, indent=2) + '\n')
+    print(f'  models/{spec["name"]}  ({spec["radius_units"]})  '
+          f'{checkpoint_path}')
+
+
+def build(specs: list[dict], out: Path) -> None:
+    """Assemble the bundle at `out` (replacing any previous build).
+
+    Args:
+        specs: One `{name, model_dir, checkpoint, radius_units, note}`
+            per model to ship, in the order the bundle's dropdown will
+            show them. `radius_units` is asserted here and nowhere
+            else in the bundle, since no file in a checkpoint says.
+        out: Bundle directory, replaced if it exists.
+
+    Raises:
+        FileNotFoundError: If a checkpoint or its config snapshot is
+            missing.
+        ValueError: If a `radius_units` is not recognized, or two
+            models share a name.
+    """
+    sys.path.insert(0, str(_WEBAPP_DIR))
+    import inference  # noqa: E402 - needs webapp dir on sys.path
+
+    # Fail before copying 60 MB, and reuse the one definition of what a
+    # valid convention is rather than restating the choices here.
+    for spec in specs:
+        inference.build_prior(spec['radius_units'])
+    names = [spec['name'] for spec in specs]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            f'Duplicate model names {names} - each becomes a directory '
+            'under models/ and a dropdown entry, so they must differ.')
+
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+    # The app itself.
+    for name in _APP_FILES:
+        shutil.copy(_WEBAPP_DIR / name, out / name)
+    _copy_tree(_WEBAPP_DIR / 'static', out / 'static')
+
+    # The models.
+    for spec in specs:
+        _copy_model(spec, out, inference)
+
+    # Vendored packages. jgnn/dsph_analysis are located via import so
+    # the script works regardless of how they're installed.
+    tsnpe_dst = out / 'tsnpe'
+    tsnpe_dst.mkdir()
+    for name in _TSNPE_MODULES:
+        shutil.copy(_REPO_TSNPE / name, tsnpe_dst / name)
+
+    import dsph_analysis
+    import jgnn
+    jgnn_src = Path(jgnn.__file__).parent
+    jgnn_dst = out / 'jgnn'
+    jgnn_dst.mkdir()
+    _copy_tree(jgnn_src / 'models', jgnn_dst / 'models')
+    _copy_tree(jgnn_src / 'transforms', jgnn_dst / 'transforms')
+    (jgnn_dst / '__init__.py').write_text(_JGNN_INIT)
+    _copy_tree(Path(dsph_analysis.__file__).parent,
+               out / 'dsph_analysis')
+
+    # Support files.
+    (out / 'requirements.txt').write_text(_REQUIREMENTS)
+    (out / 'Dockerfile').write_text(_DOCKERFILE)
+    (out / 'README.md').write_text(_BUNDLE_README)
+    _example_catalog(out / 'example_catalog.csv')
+
+    size_mb = sum(
+        f.stat().st_size for f in out.rglob('*') if f.is_file()
+    ) / 1e6
+    print(f'Bundle built at {out} ({size_mb:.0f} MB)')
+    print('Try it:  cd', out, '&& python app.py')
+
+
+def _specs_from_args(args) -> list[dict]:
+    """Turn the command line into one spec per model to ship.
+
+    `--model` reads the registry, which is where a model's radius
+    convention is declared; `--checkpoint-dir` names a checkpoint the
+    registry does not describe, so `--radius-units` has to.
+
+    Args:
+        args: Parsed command line.
+
+    Returns:
+        Specs in the order the bundle's dropdown will show them.
+
+    Raises:
+        SystemExit: If the flags are inconsistent, or `--model` names
+            something the registry does not have.
+    """
+    if bool(args.model) == bool(args.checkpoint_dir):
+        raise SystemExit(
+            'Pass either --model NAME (repeatable, from '
+            'npe_inference/configs/models.py) or --checkpoint-dir with '
+            '--radius-units, not both and not neither.')
+
+    if args.checkpoint_dir:
+        if not args.radius_units:
+            raise SystemExit(
+                '--checkpoint-dir needs --radius-units: no file in a '
+                'checkpoint records which convention it was trained '
+                'under, and the wrong value silently shifts '
+                'dm_log_rdm by a factor of r_star.')
+        checkpoint_dir = Path(args.checkpoint_dir)
+        default_name = (checkpoint_dir.parent.parent.name
+                        if checkpoint_dir.name == 'checkpoints'
+                        else checkpoint_dir.name)
+        return [dict(
+            name=args.name or default_name, model_dir=checkpoint_dir,
+            checkpoint=args.checkpoint_filename,
+            radius_units=args.radius_units, note=args.note)]
+
+    sys.path.insert(0, str(_WEBAPP_DIR))
+    import app_paths  # noqa: E402 - needs webapp dir on sys.path
+    registry = app_paths.load_registry()
+    unknown = [m for m in args.model if m not in registry]
+    if unknown:
+        raise SystemExit(
+            f'--model {", ".join(unknown)}: not registered (or the '
+            f'checkpoint is missing from {app_paths.MODEL_WORKDIR}). '
+            f'Available: {", ".join(registry) or "none"}.')
+    return [registry[m] for m in args.model]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        '--model', action='append', default=[], metavar='NAME',
+        help='A registered model to ship, by its name in '
+             'npe_inference/configs/models.py (8p_priorA, 8p_v3, '
+             '8p_v3_5M). Repeatable; the first is what the bundled app '
+             'selects by default. Takes each model\'s radius '
+             'convention from the registry, so --radius-units is not '
+             'needed.')
+    parser.add_argument(
+        '--checkpoint-dir', default=None,
+        help='Ship one checkpoint the registry does not list, by path '
+             'to the directory holding it (with config_snapshot.json '
+             'alongside or a few parents up). Requires '
+             '--radius-units.')
+    parser.add_argument('--checkpoint-filename', default='last.ckpt')
+    parser.add_argument(
+        '--radius-units', default=None, choices=('kpc', 'rstar'),
+        help="The --checkpoint-dir checkpoint's radius convention: "
+             "'kpc' for priorA (8p_ZhaoPlumCOM) or 'rstar' for priorB "
+             '(8p_ZhaoPlumCOM_v3, 8p_ZhaoPlumCOM_v3_5M). Required with '
+             '--checkpoint-dir and not guessed: nothing in the '
+             'checkpoint records it, and the wrong value silently '
+             'shifts dm_log_rdm by a factor of r_star.')
+    parser.add_argument(
+        '--name', default=None,
+        help='Name for the --checkpoint-dir model in the bundle\'s '
+             'dropdown (default: its project directory name).')
+    parser.add_argument(
+        '--note', default='',
+        help='Free text describing the --checkpoint-dir model, shown '
+             'beneath the bundled app\'s model selector.')
+    parser.add_argument(
+        '--out', default=str(_WEBAPP_DIR / 'dist' / 'dsph_explorer'),
+        help='Output bundle directory (default: webapp/dist/'
+             'dsph_explorer).')
+    args = parser.parse_args()
+    build(_specs_from_args(args), Path(args.out))
+
+
+if __name__ == '__main__':
+    main()
