@@ -2084,7 +2084,9 @@ async function loadSettings(file) {
     .map(([ds, cat]) => `${ds}: ${cat.filename} (${cat.n_rows} rows)`);
   setStatus('Settings loaded'
     + (needed.length
-      ? ` — now re-upload the catalog for ${needed.join(', ')}.`
+      ? ` — re-upload the catalog for ${needed.join(', ')} and the`
+        + ' column assignment, flag cuts and membership cut are'
+        + ' reapplied automatically.'
       : '.'), 'ok');
 }
 
@@ -2098,30 +2100,74 @@ function applyPendingSettings(ds, info) {
   const same = !want
     || (want.filename === info.filename && want.n_rows === info.n_rows);
 
+  // Count what is actually applied, not what was attempted: a column
+  // the new file does not have is silently skipped, and a summary that
+  // claimed it anyway would be worse than no summary at all.
+  const roles = [];
   for (const [role, col] of Object.entries(pending.mapping || {})) {
     const sel = document.querySelector(
       `[data-ds="${ds}"][data-role="${role}"]`);
-    if (sel && [...sel.options].some((o) => o.value === col)) {
+    if (sel && col && [...sel.options].some((o) => o.value === col)) {
       sel.value = col;
+      roles.push(role);
     }
   }
-  for (const [flag, value] of Object.entries(pending.flags || {})) {
-    const sel = document.querySelector(
-      `[data-ds="${ds}"][data-flag="${CSS.escape(flag)}"]`);
-    if (sel) sel.value = String(value);
+  const flags = [];
+  for (const sel of document.querySelectorAll(
+      `[data-ds="${ds}"][data-flag]`)) {
+    const want = (pending.flags || {})[sel.dataset.flag];
+    if (want === undefined) continue;
+    sel.value = String(want);
+    flags.push(`${escapeHtml(sel.dataset.flag)}=${want}`);
   }
   // Manual selection is a list of row ids. Against a different file
   // those ids mean something else, so it is dropped rather than
   // silently keeping the wrong stars.
   ST[ds].restoredManualIds = same ? pending.manual_ids : null;
 
+  // Say what came back. Without this the only evidence that the flag
+  // and membership cuts survived is noticing the dropdowns are not on
+  // their defaults, which is exactly the thing you would not trust.
+  const restored = [];
+  if (roles.length) {
+    restored.push(`${roles.length} column assignment`
+      + `${roles.length > 1 ? 's' : ''}`);
+  }
+  if (flags.length) {
+    restored.push(`${flags.length} flag cut`
+      + `${flags.length > 1 ? 's' : ''} (${flags.join(', ')})`);
+  }
+  const memProb = (q(ds, 'mem_prob_min') || {}).value;
+  if (roles.includes('mem_prob') && memProb !== '') {
+    restored.push(`membership &ge; ${escapeHtml(memProb)}`);
+  }
+  const dropped = Object.keys(pending.flags || {}).filter((f) =>
+    !document.querySelector(`[data-ds="${ds}"][data-flag]`)
+    || ![...document.querySelectorAll(`[data-ds="${ds}"][data-flag]`)]
+      .some((s2) => s2.dataset.flag === f));
+  if (ST[ds].restoredManualIds) {
+    restored.push(`manual selection (${ST[ds].restoredManualIds.length}`
+      + ' stars kept)');
+  }
+
   const note = q(ds, 'detectInfo');
-  if (!same && note) {
-    note.innerHTML = `<b>Note:</b> the settings were saved against `
-      + `${escapeHtml(want.filename)} (${want.n_rows} rows); this file `
-      + `is ${escapeHtml(info.filename || '?')} (${info.n_rows} rows). `
-      + `Column assignment was restored where the names matched; any `
-      + `manual star selection was dropped.`;
+  if (note) {
+    note.innerHTML = same
+      ? (restored.length
+        ? `Reapplied from settings: ${restored.join(', ')}.`
+        : 'Settings reapplied.')
+      : `<b>Note:</b> the settings were saved against `
+        + `${escapeHtml(want.filename)} (${want.n_rows} rows); this `
+        + `file is ${escapeHtml(info.filename || '?')} `
+        + `(${info.n_rows} rows). Reapplied: `
+        + `${restored.join(', ') || 'nothing'}. Any manual star `
+        + `selection was dropped`
+        + (dropped.length
+          ? `, and this file has no ${dropped.map(escapeHtml).join(', ')}`
+            + ` column${dropped.length > 1 ? 's' : ''}, so `
+            + `${dropped.length > 1 ? 'those cuts were' : 'that cut was'}`
+            + ' lost'
+          : '') + '.';
   }
   updateRunButton();
 }
