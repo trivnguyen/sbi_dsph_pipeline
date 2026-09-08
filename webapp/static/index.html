@@ -170,11 +170,17 @@
 
 <main>
   <div class="toolbar">
-    <label><input type="checkbox" id="compareToggle">
-      Compare a second dataset</label>
-    <span class="hint" style="margin:0">Overplot two runs on the same
-      panels — useful for A vs B, or the same stars under different
-      settings.</span>
+    <button class="secondary" type="button" id="addDatasetBtn">
+      + Add dataset</button>
+    <button class="secondary" type="button" id="saveSettingsBtn">
+      Save settings</button>
+    <button class="secondary" type="button" id="loadSettingsBtn">
+      Load settings</button>
+    <input type="file" id="loadSettingsInput" accept=".json"
+           style="display:none">
+    <span class="hint" style="margin:0">Every dataset is overplotted on
+      the same panels. Add one per model to compare models on identical
+      stars, or per selection to compare selections under one model.</span>
   </div>
 
   <section id="datasets"></section>
@@ -187,6 +193,11 @@
 
   <section id="results">
     <div class="summary-row" id="summaryRow"></div>
+    <p id="downloadAllRow" style="display:none; margin:4px 0 0">
+      <a id="downloadAllLink" href="#">Download all posteriors (one
+        CSV)</a>
+      <span class="hint" style="margin:0">— every run stacked, with
+        <code>label</code> and <code>model</code> columns.</span></p>
 
     <fieldset id="displayBox" style="display:none">
       <legend>Display options</legend>
@@ -213,6 +224,9 @@
             <span>Median line width</span>
             <input type="number" id="line_width" step="0.5" min="0.5"
                    value="2"></label>
+          <label class="field" style="margin-top:10px; max-width:210px">
+            <span>Color scheme</span>
+            <select id="paletteSel"></select></label>
           <div id="dsColorRows" style="margin-top:10px"></div>
         </div>
       </div>
@@ -317,20 +331,100 @@ const $ = (id) => document.getElementById(id);
 
 // Default per-dataset colors (blue / orange - a CVD-safe pair); each is
 // editable per run via the Display-options color pickers.
-const DS_COLOR = { A: '#2a78d6', B: '#e8710a' };
-const DS_LIST = ['A', 'B'];
+// Datasets are added and removed at runtime; `DS_LIST` is the live
+// ordered list of ids, not a constant. A dataset's id never changes
+// once created, so removing one leaves a gap (A, C, D) rather than
+// renaming the survivors and silently re-pointing everyone's mirror
+// and catalog references at different data.
+const DS_IDS = 'ABCDEFGH'.split('');
+const DS_PALETTE = ['#2a78d6', '#e8710a', '#2ca02c', '#c2255c',
+                    '#7b5ea7', '#8c6d31', '#0d9488', '#b45309'];
+// Named schemes, hexes taken from the installed matplotlib 3.10.8 and
+// seaborn 0.13.2 so a curve here matches the same series in a notebook.
+// The very light qualitative sets (Set3, Accent) are left out: these
+// panels overlay translucent credible bands, and a pale line vanishes
+// under them.
+const PALETTES = [
+  ['app default', DS_PALETTE],
+  ['mpl · tab10', ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+                   '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']],
+  ['mpl · Set1', ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3',
+                  '#ff7f00', '#ffff33', '#a65628', '#f781bf']],
+  ['mpl · Set2', ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3',
+                  '#a6d854', '#ffd92f', '#e5c494', '#b3b3b3']],
+  ['mpl · Dark2', ['#1b9e77', '#d95f02', '#7570b3', '#e7298a',
+                   '#66a61e', '#e6ab02', '#a6761d', '#666666']],
+  ['mpl · Paired', ['#a6cee3', '#1f78b4', '#b2df8a', '#33a02c',
+                    '#fb9a99', '#e31a1c', '#fdbf6f', '#ff7f00']],
+  ['sns · deep', ['#4c72b0', '#dd8452', '#55a868', '#c44e52',
+                  '#8172b3', '#937860', '#da8bc3', '#8c8c8c']],
+  ['sns · muted', ['#4878d0', '#ee854a', '#6acc64', '#d65f5f',
+                   '#956cb4', '#8c613c', '#dc7ec0', '#797979']],
+  ['sns · bright', ['#023eff', '#ff7c00', '#1ac938', '#e8000b',
+                    '#8b2be2', '#9f4800', '#f14cc1', '#a3a3a3']],
+  ['sns · dark', ['#001c7f', '#b1400d', '#12711c', '#8c0800',
+                  '#591e71', '#592f0d', '#a23582', '#3c3c3c']],
+  ['sns · pastel', ['#a1c9f4', '#ffb482', '#8de5a1', '#ff9f9b',
+                    '#d0bbff', '#debb9b', '#fab0e4', '#cfcfcf']],
+  ['sns · colorblind', ['#0173b2', '#de8f05', '#029e73', '#d55e00',
+                        '#cc78bc', '#ca9161', '#fbafe4', '#949494']],
+];
+
+const DS_COLOR = {};
+// Per-dataset overrides from the swatch picker. Held apart from
+// DS_COLOR because buildColorRows re-creates the inputs on every run:
+// without this a hand-picked color would silently revert to the
+// scheme's each time you hit Run.
+const DS_USER_COLOR = {};
+// Keyed by the dataset's fixed id, never by its position in DS_LIST:
+// removing a dataset must not repaint the survivors, or a curve's
+// identity would change under you mid-comparison.
+function applyPalette(name) {
+  const found = PALETTES.find(([label]) => label === name);
+  const colors = (found || PALETTES[0])[1];
+  DS_IDS.forEach((ds, i) => { DS_COLOR[ds] = colors[i % colors.length]; });
+  // Choosing a scheme is a deliberate reset: drop the manual picks
+  // rather than leave some datasets off-scheme, which reads as a bug.
+  for (const ds of Object.keys(DS_USER_COLOR)) delete DS_USER_COLOR[ds];
+  for (const ds of DS_LIST) {
+    const input = q(ds, 'color');
+    if (input) input.value = DS_COLOR[ds];
+  }
+}
+// Bootstrap the default scheme directly: applyPalette also syncs the
+// swatch inputs, and neither DS_LIST nor q() exists this early.
+DS_IDS.forEach((ds, i) => { DS_COLOR[ds] = DS_PALETTE[i]; });
+const DS_MAX = DS_IDS.length;
+let DS_LIST = ['A'];
 const INK = '#1f2430';
 
-const ST = { A: freshState(), B: freshState() };
+const ST = { A: freshState() };
 
 // Loaded models, from /api/config. Radius units are a property of the
 // checkpoint rather than a setting: each model declares its own and the
 // posterior is converted to kpc either way, so the selector reports the
 // convention instead of offering it.
 let MODELS = [];
+let DEFAULT_MODEL = null;
+
+// Populate one dataset's model dropdown. Also called for datasets
+// added after startup, which missed the initial /api/config fill.
+function fillModelSelect(ds) {
+  const sel = q(ds, 'model');
+  if (!sel || !MODELS.length) return;
+  sel.innerHTML = MODELS.map((m) =>
+    `<option value="${m.name}"${m.name === DEFAULT_MODEL
+      ? ' selected' : ''}>${m.name}</option>`).join('');
+  sel.disabled = MODELS.length < 2;
+  showModelNote(ds);
+}
 function freshState() {
   return { uploadId: null, fileColumns: [], result: null,
-           preview: null };
+           preview: null, sig: null, catalog: null,
+           // Set when settings are loaded: the column assignment,
+           // flag cuts and manual star selection cannot be applied
+           // until the matching catalog is re-uploaded.
+           pending: null, restoredManualIds: null };
 }
 
 const ROLES = [
@@ -514,15 +608,26 @@ async function api(path, options) {
 
 // --- per-dataset control panels ------------------------------------------
 function datasetPanelHTML(ds) {
-  const isB = ds === 'B';
-  const sameRow = isB ? `
-    <label class="checkline" style="margin-bottom:8px">
-      <input type="checkbox" id="B_sameAsA">
-      Use the same catalog file &amp; columns as dataset A</label>` : '';
+  const first = ds === DS_LIST[0];
+  const sameRow = first ? '' : `
+    <div class="grid2" style="margin-bottom:6px">
+      <label class="field"><span>Catalog file</span>
+        <select id="${ds}_sameAs"></select></label>
+      <label class="field"><span>Match another dataset</span>
+        <select id="${ds}_mirrorOf"></select></label>
+    </div>
+    <p class="hint" style="margin:0 0 8px">
+      Reuse another dataset's file while cutting it differently to
+      isolate a <b>selection effect</b>; or match one exactly to vary
+      only the model, the controlled <b>model comparison</b>. Matching
+      locks this dataset's fields to its source — all but the model
+      and the run label.</p>`;
   return `
   <div class="dataset" data-ds="${ds}">
     <h2><span class="swatch" style="background:${DS_COLOR[ds]}"></span>
-      Dataset ${ds}</h2>
+      Dataset ${ds}
+      ${first ? '' : `<button class="secondary small" type="button"
+        id="${ds}_removeBtn" style="margin-left:8px">Remove</button>`}</h2>
 
     <fieldset id="${ds}_catalogBox">
       <legend>1 · Catalog</legend>
@@ -620,7 +725,7 @@ function datasetPanelHTML(ds) {
       <div class="grid2">
         <label class="field"><span>Run label</span>
           <input type="text" id="${ds}_label"
-                 value="${ds === 'A' ? 'dataset_A' : 'dataset_B'}"></label>
+                 value="dataset_${ds}"></label>
         <label class="field"><span>Known system (optional)</span>
           <span style="display:flex; gap:8px">
             <input type="text" id="${ds}_lvdbKey" list="lvdbKeys"
@@ -759,13 +864,29 @@ function buildColorRows() {
   $('dsColorRows').innerHTML = PLOT.active.map((a) =>
     `<label class="checkline">
        <input type="checkbox" id="${a.ds}_show" checked>
-       <input type="color" id="${a.ds}_color" value="${DS_COLOR[a.ds]}">
+       <input type="color" id="${a.ds}_color"
+              value="${DS_USER_COLOR[a.ds] || DS_COLOR[a.ds]}">
        <span>${a.label}
          <span class="hint" style="margin:0">(dataset ${a.ds})</span></span>
      </label>`).join('');
 }
 
 // --- column mapping ------------------------------------------------------
+// Fields dataset B takes from A when mirroring. Deliberately excludes
+// `model` - the one free variable, and the point of the mode - and
+// `label`, which names the run in the legend and corner titles, so
+// mirroring it would leave the two panels indistinguishable.
+const MIRRORED_IDS = [
+  'lvdbKey', 'rhalf_kpc', 'rhalf_kpc_em', 'rhalf_kpc_ep',
+  'center_ra_deg', 'center_dec_deg', 'distance_kpc',
+  'vlos_systemic_kms', 'pmra_masyr', 'pmdec_masyr',
+  'apply_perspective_corr', 'vlos_abs_max', 'query',
+  'radius_min', 'radius_max', 'radius_unit', 'mem_prob_min',
+  'n_samples', 'batch_size', 'n_profile_samples', 'n_bins',
+  'gamma_min', 'gamma_max',
+];
+
+
 function currentMapping(ds) {
   const m = {};
   for (const sel of document.querySelectorAll(
@@ -806,11 +927,61 @@ function buildMappingUI(ds, mapping) {
 }
 
 // --- readiness -----------------------------------------------------------
+// --- dataset sourcing ----------------------------------------------------
+// Both relations point at another dataset by id and may chain (C
+// mirrors B mirrors A), so they are resolved by walking to the root.
+// The walk carries a `seen` set: the dropdowns already refuse a choice
+// that would close a loop, but a resolver that can hang if that check
+// is ever wrong is not worth the risk.
+function chainRoot(ds, pick) {
+  const seen = new Set([ds]);
+  let cur = ds;
+  for (;;) {
+    const nxt = pick(cur);
+    if (!nxt || !DS_LIST.includes(nxt) || seen.has(nxt)) return cur;
+    seen.add(nxt);
+    cur = nxt;
+  }
+}
+
+// The dataset `ds` copies its settings from, or null if independent.
+function mirrorPick(ds) {
+  const sel = q(ds, 'mirrorOf');
+  return sel && sel.value ? sel.value : null;
+}
+function mirroringA(ds) {
+  return mirrorPick(ds) !== null;
+}
+function mirrorRoot(ds) {
+  return chainRoot(ds, mirrorPick);
+}
+
+// Mirroring implies the shared catalog: "exactly the same settings"
+// cannot hold across two different files.
+function catalogPick(ds) {
+  const mirrored = mirrorPick(ds);
+  if (mirrored) return mirrored;
+  const sel = q(ds, 'sameAs');
+  return sel && sel.value ? sel.value : null;
+}
 function usingSharedCatalog(ds) {
-  return ds === 'B' && $('B_sameAsA').checked;
+  return catalogPick(ds) !== null;
 }
 function catalogSource(ds) {
-  return usingSharedCatalog(ds) ? 'A' : ds;
+  return chainRoot(ds, catalogPick);
+}
+
+// Would `target` end up depending on `ds`? Used to keep the dropdowns
+// free of choices that would form a cycle.
+function wouldCycle(ds, target, pick) {
+  const seen = new Set();
+  let cur = target;
+  while (cur && !seen.has(cur)) {
+    if (cur === ds) return true;
+    seen.add(cur);
+    cur = pick(cur);
+  }
+  return false;
 }
 function readingReady(ds) {
   const src = catalogSource(ds);
@@ -832,9 +1003,7 @@ function updateRunButton() {
     const load = q(ds, 'loadPreviewBtn');
     if (load) load.disabled = !readingReady(ds);
   }
-  const compare = $('compareToggle').checked;
-  $('runBtn').disabled =
-    !(datasetReady('A') && (!compare || datasetReady('B')));
+  $('runBtn').disabled = !DS_LIST.every(datasetReady);
 }
 
 // --- upload + inspect ----------------------------------------------------
@@ -881,6 +1050,7 @@ async function onFileChange(ds) {
     const r = await api('/api/inspect', { method: 'POST', body: form });
     ST[ds].uploadId = r.upload_id;
     ST[ds].fileColumns = r.columns;
+    ST[ds].catalog = { filename: r.filename, n_rows: r.n_rows };
     q(ds, 'inspectInfo').innerHTML =
       `${r.n_rows} rows, ${r.columns.length} columns.`;
     buildMappingUI(ds, r.mapping);
@@ -898,8 +1068,14 @@ async function onFileChange(ds) {
             </select></label>`;
         }).join('') + '</div>';
     }
-    await applySuggestion(ds, r.suggestion);
-    setStatus(`Dataset ${ds} ready — check the column assignment.`, 'ok');
+    if (ST[ds].pending) {
+      applyPendingSettings(ds, r);
+      setStatus(`Dataset ${ds} ready — settings reapplied.`, 'ok');
+    } else {
+      await applySuggestion(ds, r.suggestion);
+      setStatus(`Dataset ${ds} ready — check the column assignment.`,
+                'ok');
+    }
   } catch (e) {
     setStatus(`Dataset ${ds} inspection failed.`, 'err');
     showError(e.message);
@@ -930,6 +1106,13 @@ async function onPrefill(ds) {
 
 // --- payloads ------------------------------------------------------------
 function collectPayload(ds) {
+  const mirrored = mirrorRoot(ds);
+  if (mirrored !== ds) {
+    const p = collectPayload(mirrored);
+    p.model = q(ds, 'model').value;
+    p.label = q(ds, 'label').value;
+    return p;
+  }
   const src = catalogSource(ds);
   const ids = ['label', 'rhalf_kpc', 'rhalf_kpc_em', 'rhalf_kpc_ep',
     'center_ra_deg', 'center_dec_deg', 'distance_kpc',
@@ -1626,7 +1809,8 @@ function updatePreviewCount(ds) {
 
 function previewKeptIds(ds) {
   const pv = ST[ds].preview;
-  if (!pv || !pv.active || pv.excluded.size === 0) return null;
+  if (!pv || !pv.active) return ST[ds].restoredManualIds || null;
+  if (pv.excluded.size === 0) return null;
   return pv.ids.filter((id) => !pv.excluded.has(id));
 }
 
@@ -1739,7 +1923,221 @@ async function updateCorners() {
   btn.disabled = false;
 }
 
+// --- settings save / load ------------------------------------------------
+// The file records everything that decides a run except the catalog
+// itself, which stays out on purpose: it can be hundreds of MB, and
+// the point is to record *what was done to* a catalog. The file name
+// and row count are stored so a reload can tell you whether the file
+// you re-upload is the one the settings were written against.
+const SETTINGS_FORMAT = 'dsph-explorer-settings';
+const SETTINGS_VERSION = 1;
+
+// Every id'd control under `root`, by id with `strip` removed. Skips
+// file inputs (a browser cannot be handed a file back) and buttons.
+function snapshotControls(root, strip) {
+  const out = {};
+  if (!root) return out;
+  for (const el of root.querySelectorAll('input, select')) {
+    if (!el.id || el.type === 'file' || el.type === 'button') continue;
+    out[strip ? el.id.replace(strip, '') : el.id] =
+      el.type === 'checkbox' ? el.checked : el.value;
+  }
+  return out;
+}
+
+function restoreControls(values, prefix) {
+  for (const [key, value] of Object.entries(values || {})) {
+    const el = $(prefix ? prefix + key : key);
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = !!value;
+    else el.value = value;
+  }
+}
+
+function buildSettings() {
+  return {
+    format: SETTINGS_FORMAT,
+    version: SETTINGS_VERSION,
+    saved_at: new Date().toISOString(),
+    // Provenance only - never re-applied on load. If the server now
+    // offers different models, the dataset entries below say which
+    // ones the settings expect and the model dropdowns will show it.
+    server: { models: MODELS.map((m) =>
+      ({ name: m.name, radius_units: m.radius_units })) },
+    display: {
+      palette: $('paletteSel').value,
+      colors: Object.fromEntries(DS_LIST.map((ds) =>
+        [ds, (q(ds, 'color') || {}).value || DS_COLOR[ds]])),
+      ...snapshotControls($('displayBox')),
+      ...snapshotControls($('layoutBox')),
+      ...snapshotControls($('axisBox')),
+    },
+    datasets: DS_LIST.map((ds) => ({
+      id: ds,
+      sameAs: (q(ds, 'sameAs') || {}).value || '',
+      mirrorOf: (q(ds, 'mirrorOf') || {}).value || '',
+      fields: snapshotControls(panelEl(ds), new RegExp(`^${ds}_`)),
+      catalog: ST[ds].catalog,
+      mapping: currentMapping(ds),
+      flags: currentFlags(ds),
+      manual_ids: previewKeptIds(ds),
+    })),
+  };
+}
+
+function saveSettings() {
+  const blob = new Blob([JSON.stringify(buildSettings(), null, 2)],
+    { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'dsph_explorer_settings.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  setStatus('Settings saved.', 'ok');
+}
+
+async function loadSettings(file) {
+  let cfg;
+  try {
+    cfg = JSON.parse(await file.text());
+  } catch (e) {
+    setStatus('Could not read settings file.', 'err');
+    showError('Not valid JSON: ' + e.message);
+    return;
+  }
+  if (cfg.format !== SETTINGS_FORMAT || !Array.isArray(cfg.datasets)) {
+    setStatus('Not a settings file.', 'err');
+    showError(`Expected a "${SETTINGS_FORMAT}" file; got `
+      + `${JSON.stringify(cfg.format)}.`);
+    return;
+  }
+  showError('');
+
+  // Rebuild the panel list, then map the saved ids onto the fresh ones
+  // in order. Saved ids can have gaps (A, C, D after a removal) and
+  // re-creating those exactly is not worth the complexity - remapping
+  // consistently keeps every sameAs/mirrorOf reference valid.
+  while (DS_LIST.length > 1) removeDataset(DS_LIST[DS_LIST.length - 1]);
+  while (DS_LIST.length < Math.min(cfg.datasets.length, DS_MAX)) {
+    addDataset();
+  }
+  const idMap = {};
+  cfg.datasets.forEach((d, i) => { idMap[d.id] = DS_LIST[i]; });
+
+  cfg.datasets.forEach((d, i) => {
+    const ds = DS_LIST[i];
+    if (!ds) return;
+    restoreControls(d.fields, `${ds}_`);
+    ST[ds].pending = {
+      mapping: d.mapping || {}, flags: d.flags || {},
+      manual_ids: d.manual_ids || null, catalog: d.catalog || null,
+    };
+  });
+  // Relations after every panel exists, so the dropdowns can offer
+  // each other; refresh twice because the first pass builds the
+  // options and the second re-filters them for the new choices.
+  refreshSourceSelects();
+  cfg.datasets.forEach((d, i) => {
+    const ds = DS_LIST[i];
+    if (!ds) return;
+    for (const [name, saved] of [['sameAs', d.sameAs],
+                                 ['mirrorOf', d.mirrorOf]]) {
+      const sel = q(ds, name);
+      const want = idMap[saved];
+      if (sel && want && [...sel.options].some((o) => o.value === want)) {
+        sel.value = want;
+      }
+    }
+  });
+  refreshSourceSelects();
+  syncMirror();
+
+  const display = cfg.display || {};
+  if (display.palette) {
+    $('paletteSel').value = display.palette;
+    applyPalette(display.palette);
+  }
+  restoreControls(display);
+  for (const [saved, hex] of Object.entries(display.colors || {})) {
+    const ds = idMap[saved];
+    if (ds && hex) DS_USER_COLOR[ds] = hex;
+  }
+  buildColorRows();
+  DS_LIST.forEach(fillModelSelect);
+  cfg.datasets.forEach((d, i) => {
+    const ds = DS_LIST[i];
+    const sel = ds && q(ds, 'model');
+    const want = d.fields && d.fields.model;
+    if (sel && want && [...sel.options].some((o) => o.value === want)) {
+      sel.value = want;
+    }
+    if (ds) showModelNote(ds);
+  });
+  syncMirror();
+
+  const needed = cfg.datasets
+    .map((d, i) => [DS_LIST[i], d.catalog])
+    .filter(([ds, cat]) => ds && cat && !usingSharedCatalog(ds))
+    .map(([ds, cat]) => `${ds}: ${cat.filename} (${cat.n_rows} rows)`);
+  setStatus('Settings loaded'
+    + (needed.length
+      ? ` — now re-upload the catalog for ${needed.join(', ')}.`
+      : '.'), 'ok');
+}
+
+// Apply the parts of a loaded settings file that had to wait for the
+// catalog. Called once the upload has been inspected.
+function applyPendingSettings(ds, info) {
+  const pending = ST[ds].pending;
+  if (!pending) return;
+  ST[ds].pending = null;
+  const want = pending.catalog;
+  const same = !want
+    || (want.filename === info.filename && want.n_rows === info.n_rows);
+
+  for (const [role, col] of Object.entries(pending.mapping || {})) {
+    const sel = document.querySelector(
+      `[data-ds="${ds}"][data-role="${role}"]`);
+    if (sel && [...sel.options].some((o) => o.value === col)) {
+      sel.value = col;
+    }
+  }
+  for (const [flag, value] of Object.entries(pending.flags || {})) {
+    const sel = document.querySelector(
+      `[data-ds="${ds}"][data-flag="${CSS.escape(flag)}"]`);
+    if (sel) sel.value = String(value);
+  }
+  // Manual selection is a list of row ids. Against a different file
+  // those ids mean something else, so it is dropped rather than
+  // silently keeping the wrong stars.
+  ST[ds].restoredManualIds = same ? pending.manual_ids : null;
+
+  const note = q(ds, 'detectInfo');
+  if (!same && note) {
+    note.innerHTML = `<b>Note:</b> the settings were saved against `
+      + `${escapeHtml(want.filename)} (${want.n_rows} rows); this file `
+      + `is ${escapeHtml(info.filename || '?')} (${info.n_rows} rows). `
+      + `Column assignment was restored where the names matched; any `
+      + `manual star selection was dropped.`;
+  }
+  updateRunButton();
+}
+
 // --- run -----------------------------------------------------------------
+// A run is reused when nothing that feeds it has changed. The payload
+// is the whole input - catalog, every cut, the manual selection, the
+// model and the sampling settings - so its serialization is an exact
+// change key: re-running B after switching only B's model leaves A
+// alone. That also keeps A's draws fixed across the comparison, which
+// matters because the posterior is stochastic and a needless re-run
+// would move A's curves for no reason.
+function payloadSignature(ds) {
+  return JSON.stringify(collectPayload(ds));
+}
+
 async function runOne(ds) {
   return api('/api/run', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1747,19 +2145,59 @@ async function runOne(ds) {
   });
 }
 
+// Paint everything that describes the last run. Shared by onRun and
+// by removeDataset, so dropping a dataset takes its curve, summary and
+// corner off screen instead of leaving them behind as a record of a
+// dataset that no longer exists.
+async function renderResults(datasets) {
+  const shown = datasets.filter((ds) => ST[ds] && ST[ds].result);
+  $('summaryRow').innerHTML = shown.map((ds) =>
+    summaryTable(ds, { ...ST[ds].result.summary,
+      job_id: ST[ds].result.job_id })).join('');
+  // Only worth offering once there is more than one run to stack; a
+  // single run already has its own link in the summary table.
+  const jobs = shown.map((ds) => ST[ds].result.job_id);
+  $('downloadAllRow').style.display =
+    jobs.length > 1 ? 'block' : 'none';
+  $('downloadAllLink').href =
+    '/api/posteriors?jobs=' + encodeURIComponent(jobs.join(','));
+  buildColorRows();
+  for (const id of ['displayBox', 'layoutBox', 'axisBox',
+                    'cornerBox', 'plotCaption']) {
+    $(id).style.display = shown.length ? 'block' : 'none';
+  }
+  $('plotToolbar').style.display = shown.length ? 'flex' : 'none';
+  await renderPlot();
+  $('cornerRow').innerHTML = shown.map((ds) =>
+    `<div class="corner-col"><h3 style="color:${DS_COLOR[ds]}">
+       ${ST[ds].result.summary.label} — posterior corner
+       <button class="secondary small copy-corner" data-ds="${ds}"
+               style="margin-left:8px">Copy image</button></h3>
+     <img src="${ST[ds].result.corner_png}" alt="corner ${ds}"
+          data-ds="${ds}"></div>`).join('');
+  applyCornerVisibility();
+}
+
 async function onRun() {
-  const compare = $('compareToggle').checked;
-  const datasets = compare ? ['A', 'B'] : ['A'];
+  const datasets = DS_LIST.slice();
+  const compare = datasets.length > 1;
   showError('');
   $('runBtn').disabled = true;
   try {
     const active = [];
+    const reused = [];
     for (const ds of datasets) {
-      setStatus(compare
-        ? `Running dataset ${ds} — this can take a few minutes…`
-        : 'Running inference — this can take a few minutes…', 'busy');
-      const r = await runOne(ds);
-      ST[ds].result = r;
+      const sig = payloadSignature(ds);
+      if (ST[ds].result && ST[ds].sig === sig) {
+        reused.push(ds);
+      } else {
+        setStatus(compare
+          ? `Running dataset ${ds} — this can take a few minutes…`
+          : 'Running inference — this can take a few minutes…', 'busy');
+        ST[ds].result = await runOne(ds);
+        ST[ds].sig = sig;
+      }
+      const r = ST[ds].result;
       const pr = r.profiles;
       const sorted = {};
       for (const key of Object.keys(pr.samples)) {
@@ -1769,29 +2207,15 @@ async function onRun() {
         sorted: sorted, binned: pr.binned, wolf: pr.wolf });
     }
     PLOT.active = active;
-
-    $('summaryRow').innerHTML = datasets.map((ds) =>
-      summaryTable(ds, { ...ST[ds].result.summary,
-        job_id: ST[ds].result.job_id })).join('');
-    buildColorRows();
-    $('displayBox').style.display = 'block';
-    $('layoutBox').style.display = 'block';
-    $('axisBox').style.display = 'block';
-    $('cornerBox').style.display = 'block';
-    $('plotToolbar').style.display = 'flex';
-    $('plotCaption').style.display = 'block';
-    await renderPlot();
-    $('cornerRow').innerHTML = datasets.map((ds) =>
-      `<div class="corner-col"><h3 style="color:${DS_COLOR[ds]}">
-         ${ST[ds].result.summary.label} — posterior corner
-         <button class="secondary small copy-corner" data-ds="${ds}"
-                 style="margin-left:8px">Copy image</button></h3>
-       <img src="${ST[ds].result.corner_png}" alt="corner ${ds}"
-            data-ds="${ds}"></div>`)
-      .join('');
-    applyCornerVisibility();
-    setStatus('Done. Tune bands/colors and axis ranges below; the '
-      + 'camera icon saves a PNG.', 'ok');
+    await renderResults(datasets);
+    const note = reused.length === datasets.length
+      ? `Nothing changed — reused ${reused.length > 1
+          ? 'all ' + reused.length + ' runs' : 'the run'}. `
+      : reused.length
+        ? `Reused dataset ${reused.join(', ')} (unchanged). `
+        : '';
+    setStatus(note + 'Done. Tune bands/colors and axis ranges below; '
+      + 'the camera icon saves a PNG.', 'ok');
   } catch (e) {
     setStatus('Run failed.', 'err');
     showError(e.message);
@@ -1839,23 +2263,146 @@ function wireDataset(ds) {
   }
 }
 
+// Show the mirrored values in B's own fields rather than only
+// redirecting the payload: the numbers stay visible (and the readiness
+// checks, which read B's inputs, keep working), while `disabled` makes
+// it obvious they are not B's to edit. collectPayload still reads A, so
+// a missed sync can never send stale values.
+// Rebuild the "same catalog as" / "match" dropdowns. Options exclude
+// the dataset itself and any choice that would close a dependency
+// loop, so a cycle cannot be selected in the first place.
+function refreshSourceSelects() {
+  for (const ds of DS_LIST) {
+    for (const [name, pick, none] of [
+      ['sameAs', catalogPick, 'use my own file'],
+      ['mirrorOf', mirrorPick, 'independent'],
+    ]) {
+      const sel = q(ds, name);
+      if (!sel) continue;
+      const keep = sel.value;
+      const options = DS_LIST.filter(
+        (o) => o !== ds && !wouldCycle(ds, o, pick));
+      sel.innerHTML = `<option value="">(${none})</option>`
+        + options.map((o) => `<option value="${o}">dataset ${o}`
+          + `</option>`).join('');
+      sel.value = options.includes(keep) ? keep : '';
+    }
+  }
+}
+
+function syncMirror() {
+  for (const ds of DS_LIST) {
+    const src = mirrorRoot(ds);
+    const on = src !== ds;
+    for (const id of MIRRORED_IDS) {
+      const a = q(src, id);
+      const b = q(ds, id);
+      if (!a || !b) continue;
+      if (on) b.value = a.value;
+      b.disabled = on;
+    }
+    // The source's file, columns and manual selection are what this
+    // dataset will use, so its own copies would be misleading.
+    const sameAs = q(ds, 'sameAs');
+    if (sameAs) {
+      if (on) sameAs.value = mirrorPick(ds);
+      sameAs.disabled = on;
+    }
+    const inner = q(ds, 'catalogInner');
+    if (inner) {
+      inner.style.display = usingSharedCatalog(ds) ? 'none' : '';
+    }
+    const adv = q(ds, 'advBox');
+    if (adv) adv.style.display = on ? 'none' : '';
+  }
+  updateRunButton();
+}
+
+function panelEl(ds) {
+  return document.querySelector(`.dataset[data-ds="${ds}"]`);
+}
+
+function addDataset() {
+  const ds = DS_IDS.find((c) => !DS_LIST.includes(c));
+  if (!ds) return;
+  DS_LIST.push(ds);
+  ST[ds] = freshState();
+  $('datasets').insertAdjacentHTML('beforeend', datasetPanelHTML(ds));
+  wireDataset(ds);
+  wireDatasetSources(ds);
+  fillModelSelect(ds);
+  refreshSourceSelects();
+  syncMirror();
+  $('addDatasetBtn').disabled = DS_LIST.length >= DS_MAX;
+}
+
+function removeDataset(ds) {
+  // Anything pointing at the departing dataset falls back to
+  // independent rather than silently re-pointing at other data.
+  for (const other of DS_LIST) {
+    for (const name of ['sameAs', 'mirrorOf']) {
+      const sel = q(other, name);
+      if (sel && sel.value === ds) sel.value = '';
+    }
+  }
+  purgePreviewDivs(ds);
+  panelEl(ds).remove();
+  DS_LIST = DS_LIST.filter((o) => o !== ds);
+  delete ST[ds];
+  refreshSourceSelects();
+  syncMirror();
+  $('addDatasetBtn').disabled = DS_LIST.length >= DS_MAX;
+  if (PLOT.active.some((a) => a.ds === ds)) {
+    PLOT.active = PLOT.active.filter((a) => a.ds !== ds);
+    renderResults(DS_LIST);
+  }
+}
+
+// Live lock: an edit anywhere propagates to whatever mirrors it.
+function wireDatasetSources(ds) {
+  for (const name of ['sameAs', 'mirrorOf']) {
+    const sel = q(ds, name);
+    if (sel) {
+      sel.addEventListener('change', () => {
+        refreshSourceSelects();
+        syncMirror();
+      });
+    }
+  }
+  const remove = q(ds, 'removeBtn');
+  if (remove) remove.addEventListener('click', () => removeDataset(ds));
+  const panel = panelEl(ds);
+  for (const ev of ['input', 'change']) {
+    panel.addEventListener(ev, () => syncMirror());
+  }
+}
+
 function initDatasets() {
   $('datasets').innerHTML =
     DS_LIST.map((ds) => datasetPanelHTML(ds)).join('');
   DS_LIST.forEach(wireDataset);
+  DS_LIST.forEach(wireDatasetSources);
   buildAxisGrid();
   buildBandRows();
-
-  const panelB = document.querySelector('.dataset[data-ds="B"]');
-  panelB.style.display = 'none';
-  $('compareToggle').addEventListener('change', () => {
-    panelB.style.display = $('compareToggle').checked ? '' : 'none';
-    updateRunButton();
+  $('addDatasetBtn').addEventListener('click', addDataset);
+  $('saveSettingsBtn').addEventListener('click', saveSettings);
+  $('loadSettingsBtn').addEventListener('click',
+    () => $('loadSettingsInput').click());
+  $('loadSettingsInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) await loadSettings(file);
+    // Clear so re-picking the same file fires `change` again.
+    e.target.value = '';
   });
-  $('B_sameAsA').addEventListener('change', () => {
-    $('B_catalogInner').style.display =
-      $('B_sameAsA').checked ? 'none' : '';
-    updateRunButton();
+  $('paletteSel').innerHTML = PALETTES.map(([label]) =>
+    `<option value="${label}">${label}</option>`).join('');
+  $('paletteSel').addEventListener('change', (e) => {
+    applyPalette(e.target.value);
+    buildColorRows();
+  });
+  $('dsColorRows').addEventListener('input', (e) => {
+    const m = /^([A-H])_color$/.exec(e.target.id || '');
+    if (m) DS_USER_COLOR[m[1]] = e.target.value;
   });
 
   $('runBtn').addEventListener('click', onRun);
@@ -1889,16 +2436,11 @@ function initDatasets() {
   try {
     const cfg = await api('/api/config');
     MODELS = cfg.models;
+    DEFAULT_MODEL = cfg.default_model;
     $('serverInfo').textContent =
       `${MODELS.length} model${MODELS.length === 1 ? '' : 's'} loaded` +
       ` · device: ${cfg.device} · output in kpc`;
-    for (const ds of ['A', 'B']) {
-      q(ds, 'model').innerHTML = MODELS.map((m) =>
-        `<option value="${m.name}"${m.name === cfg.default_model
-          ? ' selected' : ''}>${m.name}</option>`).join('');
-      q(ds, 'model').disabled = MODELS.length < 2;
-      showModelNote(ds);
-    }
+    DS_LIST.forEach(fillModelSelect);
     const sys = await api('/api/systems');
     $('lvdbKeys').innerHTML =
       sys.keys.map((k) => `<option value="${k}">`).join('');

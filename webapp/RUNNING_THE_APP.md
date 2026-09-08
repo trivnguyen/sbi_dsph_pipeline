@@ -81,6 +81,12 @@ You should see the "dSph posterior explorer" page.
    each and see how much the answer moves. Results are in the same
    units whichever you pick, and switching is instant - all of them
    are already loaded.
+   To compare them side by side, click **+ Add dataset**, set the new
+   panel's "Match another dataset" to the first one, and give it a
+   different model - everything else is copied and locked, so the
+   model is the only difference. Repeat for as many models as you
+   want; **Download all posteriors** then gives you one CSV of all of
+   them with a `model` column.
 4. Click **Run inference**. A run with the default settings takes
    roughly 1-2 minutes on a normal laptop (this image runs on CPU).
 5. You'll get an interactive profile plot (drag to zoom, hover for
@@ -93,6 +99,13 @@ Every radius the app reports is in kpc; the `log`-named parameters are
 base-10 logs of it, so `df_log_ra_kpc = -1` means `r_a = 0.1` kpc. On
 the corner plot, the dashed red line on the two radius panels marks
 the half-light radius you entered, for scale.
+
+Once a run is set up the way you want it, **Save settings** (top of
+the page) downloads a small JSON file with every field you filled in.
+**Load settings** puts it all back later, or on someone else's
+machine - you just re-upload the catalog itself, which is not in the
+file. That is the easy way to send someone the exact configuration
+behind a figure.
 
 I've also attached **`example_catalog.csv`** if you want to try the
 app out first before using your own data - use `R_half = 0.2` with

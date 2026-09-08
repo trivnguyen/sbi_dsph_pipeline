@@ -87,9 +87,17 @@ STATE = {}
 # One inference at a time (shared device); concurrent requests queue.
 _RUN_LOCK = threading.Lock()
 
-_MAX_CACHED = 8
+# Uploads are files on disk, so keep few. Results are one posterior
+# array each (~64 kB) and are kept far longer: the frontend reuses a
+# run whose inputs have not changed rather than recomputing it, so a
+# job_id can stay referenced - by its CSV link and its corner
+# re-render - across many later runs of the *other* dataset. Evicting
+# on the upload's schedule would break those links while the run is
+# still on screen.
+_MAX_UPLOADS = 8
+_MAX_RESULTS = 64
 _UPLOADS = OrderedDict()  # upload_id -> saved file path
-_RESULTS = OrderedDict()  # job_id -> {label, posterior}
+_RESULTS = OrderedDict()  # job_id -> {label, posterior, model}
 
 
 def _default_workers() -> int:
@@ -104,10 +112,17 @@ def _default_workers() -> int:
     return max(1, min(n, 32))
 
 
-def _remember(cache: OrderedDict, key: str, value) -> None:
-    """Insert into a bounded cache, evicting the oldest entry."""
+def _remember(cache: OrderedDict, key: str, value, limit: int) -> None:
+    """Insert into a bounded cache, evicting the oldest entry.
+
+    Args:
+        cache: The cache to insert into.
+        key: Cache key.
+        value: Value to store.
+        limit: Maximum entries to keep.
+    """
     cache[key] = value
-    while len(cache) > _MAX_CACHED:
+    while len(cache) > limit:
         cache.popitem(last=False)
 
 
@@ -261,7 +276,7 @@ def inspect(file: UploadFile):
         suggestion = dict(suggested_key=None, reason=None,
                           sep_arcmin=None, candidates=[])
 
-    _remember(_UPLOADS, upload_id, path)
+    _remember(_UPLOADS, upload_id, path, _MAX_UPLOADS)
     return dict(upload_id=upload_id, filename=file.filename,
                 suggestion=suggestion, **inspection)
 
@@ -442,7 +457,7 @@ def run(payload: dict):
                 _corner_title(dict(label=label, model=entry['name'])))
             _remember(_RESULTS, job_id,
                       dict(label=label, posterior=posterior,
-                           model=entry['name']))
+                           model=entry['name']), _MAX_RESULTS)
             profiles = inference.profiles_payload(
                 inference.R_VEC_KPC, jeans, vdisp_profile,
                 vkurtosis_profile, wolf)
@@ -501,6 +516,50 @@ def download_posterior(job_id: str):
     return PlainTextResponse(csv, media_type='text/csv', headers={
         'Content-Disposition':
             f'attachment; filename="{safe}_posterior.csv"'})
+
+
+@app.get('/api/posteriors')
+def download_posteriors(jobs: str):
+    """Several runs' posteriors stacked into one tidy CSV.
+
+    The per-run columns are unchanged; two identifier columns are
+    prepended so the rows stay separable once concatenated. That is the
+    shape the comparison modes produce - several runs over one catalog
+    differing only in the model, or one model over several selections -
+    so a single `groupby` recovers whichever axis was varied.
+
+    Args:
+        jobs: Comma-separated job_ids, in the order to stack them.
+
+    Returns:
+        A text/csv attachment.
+
+    Raises:
+        HTTPException: If `jobs` is empty or names an unknown run.
+    """
+    job_ids = [j for j in (jobs or '').split(',') if j.strip()]
+    if not job_ids:
+        raise HTTPException(
+            status_code=400, detail='No job_ids given.')
+    missing = [j for j in job_ids if j not in _RESULTS]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f'Unknown or expired job_id(s): {", ".join(missing)} '
+                   '- re-run those datasets.')
+
+    frames = []
+    for job_id in job_ids:
+        c = _RESULTS[job_id]
+        frame = pd.DataFrame(
+            c['posterior'], columns=inference.KPC_PARAM_NAMES)
+        frame.insert(0, 'model', c['model'])
+        frame.insert(0, 'label', c['label'])
+        frames.append(frame)
+    csv = pd.concat(frames, ignore_index=True).to_csv(index=False)
+    return PlainTextResponse(csv, media_type='text/csv', headers={
+        'Content-Disposition':
+            f'attachment; filename="posteriors_{len(job_ids)}runs.csv"'})
 
 
 @app.post('/api/corner/{job_id}')

@@ -151,6 +151,70 @@ perspective-rotation correction. Systems in the bundled
 local_volume_database snapshot can be prefilled by key (which also
 enables the literature Wolf-mass marker).
 
+## Comparing several runs
+
+Add up to 8 datasets; every one is overplotted on the same panels and
+gets its own corner plot and summary. Each dataset past the first
+chooses two things independently:
+
+- **Catalog file** — its own upload, or another dataset's. Sharing the
+  file while cutting it differently is how you isolate a *selection
+  effect*.
+- **Match another dataset** — when set, every field except the model
+  and the run label is copied from that dataset and locked, so the
+  model is the only free variable. That is the controlled *model
+  comparison*.
+
+Both relations may chain (C matches B, B matches A) and are resolved to
+the root; the dropdowns omit any choice that would close a loop, so a
+cycle cannot be selected. Removing a dataset resets anything pointing
+at it back to independent rather than silently re-pointing it at other
+data, and takes its curve and corner off screen.
+
+Curve colors come from a **Color scheme** dropdown in the display
+options — matplotlib's `tab10`, `Set1`, `Set2`, `Dark2`, `Paired` and
+seaborn's `deep`, `muted`, `bright`, `dark`, `pastel`, `colorblind`,
+with hexes read out of the installed matplotlib/seaborn rather than
+transcribed, so a curve here matches the same series in a notebook.
+The very light sets (`Set3`, `Accent`) are deliberately absent: these
+panels overlay translucent credible bands and a pale line disappears
+under them. The per-dataset swatch still overrides any individual
+color, and now survives a re-run; picking a scheme clears the
+overrides. Colors are keyed to a dataset's fixed id, so removing one
+never repaints the others mid-comparison.
+
+With more than one run on screen, **Download all posteriors** returns a
+single CSV of every run stacked, with `label` and `model` columns
+prepended so a `groupby` recovers whichever axis you varied. The
+per-parameter columns are unchanged from the single-run download.
+
+## Saving and restoring a configuration
+
+**Save settings** writes a JSON file describing every input that
+decides a run: each dataset's system metadata, cuts, row filter,
+column assignment, flag cuts, manual star selection, model and
+sampling settings, plus the dataset topology (which datasets share a
+catalog or match another) and the display options. **Load settings**
+puts it all back.
+
+The catalog itself is deliberately not in the file — it can be
+hundreds of MB, and the point is to record what was *done to* a
+catalog. Instead each dataset records the file name and row count it
+was configured against, so after loading you re-upload the catalogs
+and the app reports which ones it expects. Column assignment and flag
+cuts are reapplied automatically once the file arrives. If the file
+does not match what was saved, the column assignment is still restored
+where the names line up but the **manual star selection is dropped** —
+those are row ids, and against a different file they select different
+stars — and the dataset says so.
+
+Saved dataset ids are remapped onto fresh ones in order (a file saved
+with A, C, D loads as A, B, C), with every "same catalog as" and
+"match" reference rewritten to suit, so the restored configuration is
+the one that was saved even though the ids differ. Round-tripping is
+exact: the request payload after a reload is byte-identical to the one
+before it.
+
 ## Output units
 
 Everything the app hands back — the profile panels, the corner plot,
@@ -182,8 +246,14 @@ it is the part that carries information.
 - The Jeans-profile worker count is a server-side setting
   (`--profile-workers`, default = available CPUs capped at 32), not a
   UI field.
-- The last 8 runs/uploads are cached in memory; older `job_id`s expire
-  and need a re-run.
+- The last 8 uploads and 64 runs are cached in memory; older
+  `job_id`s expire and need a re-run.
+- A run is reused rather than recomputed when nothing feeding it has
+  changed, keyed on the whole request payload. So re-running after
+  switching one dataset's model leaves the others alone — which also
+  holds their draws fixed, since the posterior is stochastic and a
+  needless re-run would move their curves for no reason. The status
+  line says which datasets were reused.
 - `sample_posterior` cuts its draws to the prior box, so a run returns
   slightly fewer samples than requested (~95% of `n_samples`, in
   practice). If it returns *none*, the error names the two things that
