@@ -537,6 +537,33 @@ const PANELS = [
   ['kappa', 'LOS kurtosis', 'linear'],
 ];
 
+// Default view for each panel, in data units (the log axes are
+// converted to decades below). Fixed rather than fitted to the run, so
+// two datasets - or two sessions - are directly comparable without
+// first realising the axes moved under you.
+//
+// Anchored on the 67 dwarfs in the bundled local_volume_database
+// snapshot, not chosen by eye:
+//   r      0.01-5 kpc     grid is 0.01-10; largest real r_1/2 is 2.5
+//   rho    1e4-1e11       mean rho(<r_1/2) spans 1e5.7-1e9.9 over the
+//                         45 dwarfs with a Wolf mass, plus ~a decade
+//                         each side for the inner cusp and the outer
+//                         falloff, which the panel also draws
+//   mass   1e3-1e10       M_1/2 spans 1e4.5-1e9.0, same headroom
+//   beta   -0.5 to 1      hard model bounds, not a choice: the prior
+//                         has df_beta0 >= -0.499 and Osipkov-Merritt
+//                         anisotropy rises to 1 at large radius
+//   sigma  0-30 km/s      covers all 45 measured dispersions (max 27.6)
+//   kappa  0-10           3 is the Gaussian value
+const DEFAULT_RANGE = {
+  r: [0.01, 5],
+  rho: [1e4, 1e11],
+  mass: [1e3, 1e10],
+  beta: [-0.5, 1],
+  sigma: [0, 30],
+  kappa: [0, 10],
+};
+
 // Axis-range control rows: key, label, is-log, canonical Plotly layout
 // key (panel 1 is 'yaxis', not 'yaxis1', in the normalized layout).
 const AXES = [
@@ -887,6 +914,28 @@ const MIRRORED_IDS = [
 ];
 
 
+function buildFlagsUI(ds, flagColumns) {
+  const box = q(ds, 'flagsBox');
+  if (!box) return;
+  if (!flagColumns || !flagColumns.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML =
+    '<p class="hint"><b>Flag columns</b> (boolean columns found in '
+    + 'the file)</p><div class="grid2">'
+    + flagColumns.map((c) => {
+      const esc = c.replace(/"/g, '&quot;');
+      return `<label class="field"><span>${c}</span>
+        <select data-ds="${ds}" data-flag="${esc}">
+          <option value="">ignore</option>
+          <option value="true">require true</option>
+          <option value="false">require false</option>
+        </select></label>`;
+    }).join('') + '</div>';
+}
+
+
 function currentMapping(ds) {
   const m = {};
   for (const sel of document.querySelectorAll(
@@ -1054,20 +1103,7 @@ async function onFileChange(ds) {
     q(ds, 'inspectInfo').innerHTML =
       `${r.n_rows} rows, ${r.columns.length} columns.`;
     buildMappingUI(ds, r.mapping);
-    if (r.flag_columns.length) {
-      q(ds, 'flagsBox').innerHTML =
-        '<p class="hint"><b>Flag columns</b> (boolean columns found in '
-        + 'the file)</p><div class="grid2">'
-        + r.flag_columns.map((c) => {
-          const esc = c.replace(/"/g, '&quot;');
-          return `<label class="field"><span>${c}</span>
-            <select data-ds="${ds}" data-flag="${esc}">
-              <option value="">ignore</option>
-              <option value="true">require true</option>
-              <option value="false">require false</option>
-            </select></label>`;
-        }).join('') + '</div>';
-    }
+    buildFlagsUI(ds, r.flag_columns);
     if (ST[ds].pending) {
       applyPendingSettings(ds, r);
       setStatus(`Dataset ${ds} ready — settings reapplied.`, 'ok');
@@ -1365,17 +1401,6 @@ function buildTraces(s) {
   return traces;
 }
 
-function initialLogRange(key) {
-  let lo = Infinity, hi = -Infinity;
-  for (const a of PLOT.active) {
-    const c = a.sorted[key];
-    lo = Math.min(lo, ...c.map((col) => percentileSorted(col, 16))
-      .filter((v) => v > 0));
-    hi = Math.max(hi, ...c.map((col) => percentileSorted(col, 84)));
-  }
-  return [Math.log10(lo) - 0.4, Math.log10(hi) + 0.4];
-}
-
 // Snapshot the current axis views so a re-render (band toggle, recolor,
 // relayout) keeps the user where they were instead of resetting the
 // zoom. Grabs every x/y panel axis so it works at any grid size.
@@ -1457,18 +1482,19 @@ function buildLayout(s, L, prev) {
     // With shared x, only the master axis (n=1) carries a range and the
     // rest follow via `matches`; with independent x, each keeps its own.
     if (n === 1 || !L.shareX) {
-      applyRange(layout[xk], prev && prev[xk], true, null);
+      applyRange(layout[xk], prev && prev[xk], true, 'r');
     }
-    applyRange(layout[yk], prev && prev[yk], scale === 'log',
-               scale === 'log' ? key : null);
+    applyRange(layout[yk], prev && prev[yk], scale === 'log', key);
   });
   return layout;
 }
 
-function applyRange(axis, saved, isLog, logKeyForInitial) {
+function applyRange(axis, saved, isLog, key) {
   if (saved && saved.autorange) { axis.autorange = true; return; }
   if (saved && saved.range) { axis.range = saved.range.slice(); return; }
-  if (logKeyForInitial) axis.range = initialLogRange(logKeyForInitial);
+  const span = DEFAULT_RANGE[key];
+  if (!span) return;
+  axis.range = isLog ? span.map((v) => Math.log10(v)) : span.slice();
 }
 
 let _pending = false;
@@ -1978,6 +2004,10 @@ function buildSettings() {
       mirrorOf: (q(ds, 'mirrorOf') || {}).value || '',
       fields: snapshotControls(panelEl(ds), new RegExp(`^${ds}_`)),
       catalog: ST[ds].catalog,
+      // Lets a reload pick the catalog back up from this same server
+      // without re-uploading it. Meaningless elsewhere, and the load
+      // path treats a miss as routine.
+      upload_id: ST[ds].uploadId,
       mapping: currentMapping(ds),
       flags: currentFlags(ds),
       manual_ids: previewKeptIds(ds),
@@ -2034,6 +2064,7 @@ async function loadSettings(file) {
     ST[ds].pending = {
       mapping: d.mapping || {}, flags: d.flags || {},
       manual_ids: d.manual_ids || null, catalog: d.catalog || null,
+      upload_id: d.upload_id || null,
     };
   });
   // Relations after every panel exists, so the dropdowns can offer
@@ -2078,16 +2109,69 @@ async function loadSettings(file) {
   });
   syncMirror();
 
-  const needed = cfg.datasets
-    .map((d, i) => [DS_LIST[i], d.catalog])
-    .filter(([ds, cat]) => ds && cat && !usingSharedCatalog(ds))
-    .map(([ds, cat]) => `${ds}: ${cat.filename} (${cat.n_rows} rows)`);
+  // Reclaiming the catalog is best-effort: it only works against the
+  // server that took the upload, so a miss is the normal case for a
+  // settings file moved between machines, not an error. Either way
+  // every other setting is already in place by this point.
+  const reclaimed = [];
+  const needed = [];
+  for (const [i, d] of cfg.datasets.entries()) {
+    const ds = DS_LIST[i];
+    if (!ds || usingSharedCatalog(ds)) continue;
+    const label = d.catalog
+      ? `${ds}: ${d.catalog.filename} (${d.catalog.n_rows} rows)` : ds;
+    if (await reclaimUpload(ds)) reclaimed.push(ds);
+    else if (d.catalog) needed.push(label);
+  }
+
+  const parts = [];
+  if (reclaimed.length) {
+    parts.push(`reused the catalog already on this server for `
+      + `${reclaimed.join(', ')}`);
+  }
+  if (needed.length) {
+    parts.push(`re-upload the catalog for ${needed.join(', ')} — the`
+      + ' column assignment, flag cuts and membership cut are'
+      + ' reapplied automatically');
+  }
   setStatus('Settings loaded'
-    + (needed.length
-      ? ` — re-upload the catalog for ${needed.join(', ')} and the`
-        + ' column assignment, flag cuts and membership cut are'
-        + ' reapplied automatically.'
-      : '.'), 'ok');
+    + (parts.length ? ' — ' + parts.join('; ') + '.' : '.'), 'ok');
+}
+
+// Try to pick a dataset's catalog back up from the server it was
+// uploaded to, so a settings file reloaded in the same session needs
+// no re-upload. Returns whether it worked; a miss is expected whenever
+// the file has travelled, and is never treated as a failure of the
+// load - every other setting is applied regardless.
+async function reclaimUpload(ds) {
+  const pending = ST[ds].pending;
+  if (!pending || !pending.upload_id) return false;
+  let info;
+  try {
+    info = await api('/api/upload/'
+      + encodeURIComponent(pending.upload_id));
+  } catch (e) {
+    const note = q(ds, 'detectInfo');
+    if (note) {
+      note.innerHTML = 'The saved catalog is not on this server '
+        + '— re-upload it and the rest of the settings will be '
+        + 'reapplied. Everything else was restored.';
+    }
+    return false;
+  }
+  ST[ds].uploadId = info.upload_id;
+  ST[ds].fileColumns = info.columns;
+  ST[ds].catalog = pending.catalog;
+  const shown = pending.catalog || {};
+  q(ds, 'inspectInfo').innerHTML =
+    `${info.n_rows} rows, ${info.columns.length} columns`
+    + (shown.filename ? ` — ${escapeHtml(shown.filename)}, reused from`
+      + ' this server (no re-upload needed).' : '.');
+  buildMappingUI(ds, info.mapping);
+  buildFlagsUI(ds, info.flag_columns);
+  applyPendingSettings(ds, { ...info, filename: shown.filename,
+                             n_rows: info.n_rows });
+  return true;
 }
 
 // Apply the parts of a loaded settings file that had to wait for the

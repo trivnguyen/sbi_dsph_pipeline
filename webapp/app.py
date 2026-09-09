@@ -37,6 +37,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -44,6 +45,7 @@ import traceback
 import uuid
 from collections import OrderedDict
 from pathlib import Path
+from typing import Optional
 
 # Cap math-library thread pools BEFORE numpy/torch load: CPU torch
 # defaults to one thread per core, which multiplies across the web
@@ -248,6 +250,64 @@ def get_meta(key: str):
     )
 
 
+_UPLOAD_ID_RE = re.compile(r'^[0-9a-f]{32}$')
+
+
+def resolve_upload(upload_id) -> Optional[Path]:
+    """The saved file for `upload_id`, or None if it is gone.
+
+    Falls back to the file on disk when the in-memory entry has been
+    evicted, or when the process restarted against a persistent
+    --output-dir. The id is checked against the uuid4 hex shape first:
+    it reaches the glob below, and a client-supplied path fragment has
+    no business there.
+
+    Args:
+        upload_id: The id handed out by /api/inspect.
+
+    Returns:
+        The catalog's path, or None.
+    """
+    if not isinstance(upload_id, str) or not _UPLOAD_ID_RE.match(upload_id):
+        return None
+    known = _UPLOADS.get(upload_id)
+    if known is not None and Path(known).exists():
+        return known
+    for path in sorted(STATE['output_dir'].glob(f'upload_{upload_id}.*')):
+        _remember(_UPLOADS, upload_id, path, _MAX_UPLOADS)
+        return path
+    return None
+
+
+def _inspect_catalog_file(path: Path) -> dict:
+    """Parse a saved catalog and describe its columns.
+
+    Args:
+        path: The saved catalog file.
+
+    Returns:
+        The inspection payload, plus a best-effort `suggestion`.
+
+    Raises:
+        HTTPException: If the file cannot be parsed.
+    """
+    try:
+        df = user_catalog.read_catalog(str(path))
+        inspection = user_catalog.inspect_catalog(df)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f'Could not parse catalog: {e}')
+
+    # Best-effort prefill suggestion; never fail the upload over it.
+    try:
+        suggestion = user_catalog.suggest_system(
+            df, inspection['mapping'], kinematic_io.load_meta_table())
+    except Exception:
+        suggestion = dict(suggested_key=None, reason=None,
+                          sep_arcmin=None, candidates=[])
+    return dict(suggestion=suggestion, **inspection)
+
+
 @app.post('/api/inspect')
 def inspect(file: UploadFile):
     """Save an uploaded catalog and auto-detect its columns.
@@ -261,24 +321,43 @@ def inspect(file: UploadFile):
     with open(path, 'wb') as f:
         f.write(file.file.read())
     try:
-        df = user_catalog.read_catalog(str(path))
-        inspection = user_catalog.inspect_catalog(df)
-    except Exception as e:
+        described = _inspect_catalog_file(path)
+    except HTTPException:
         path.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=400, detail=f'Could not parse catalog: {e}')
-
-    # Best-effort prefill suggestion; never fail the upload over it.
-    try:
-        suggestion = user_catalog.suggest_system(
-            df, inspection['mapping'], kinematic_io.load_meta_table())
-    except Exception:
-        suggestion = dict(suggested_key=None, reason=None,
-                          sep_arcmin=None, candidates=[])
+        raise
 
     _remember(_UPLOADS, upload_id, path, _MAX_UPLOADS)
     return dict(upload_id=upload_id, filename=file.filename,
-                suggestion=suggestion, **inspection)
+                **described)
+
+
+@app.get('/api/upload/{upload_id}')
+def get_upload(upload_id: str):
+    """Re-describe a catalog this server still holds.
+
+    Lets a loaded settings file pick its catalog back up without the
+    user re-uploading it. Returns exactly what /api/inspect returns,
+    minus the original file name, which is not kept on disk - the
+    settings file carries that.
+
+    Args:
+        upload_id: The id recorded in the settings file.
+
+    Returns:
+        The inspection payload.
+
+    Raises:
+        HTTPException: 404 if the server no longer has the file.
+    """
+    path = resolve_upload(upload_id)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail='This server no longer has that catalog - it was '
+                   'uploaded to a different server, or the run '
+                   'directory has been cleared.')
+    return dict(upload_id=upload_id, filename=None,
+                **_inspect_catalog_file(path))
 
 
 @app.post('/api/preview')
@@ -292,13 +371,13 @@ def preview(payload: dict):
     the user exclude/keep stars interactively, and sends the kept row
     indices back to /api/run as `manual_ids`.
     """
-    upload_id = payload.get('upload_id')
-    if upload_id not in _UPLOADS:
+    catalog_path = resolve_upload(payload.get('upload_id'))
+    if catalog_path is None:
         raise HTTPException(
             status_code=400,
             detail='Unknown upload_id - (re-)upload the catalog first.')
     try:
-        df = user_catalog.read_catalog(str(_UPLOADS[upload_id]))
+        df = user_catalog.read_catalog(str(catalog_path))
         mapping = user_catalog.resolve_mapping(
             df, payload.get('columns') or {})
         data = user_catalog.select_for_preview(
@@ -334,8 +413,8 @@ def run(payload: dict):
     target, sample the posterior, compute the Jeans/binned/Wolf
     profiles, and return the corner PNG + the interactive-profile JSON.
     """
-    upload_id = payload.get('upload_id')
-    if upload_id not in _UPLOADS:
+    catalog_path = resolve_upload(payload.get('upload_id'))
+    if catalog_path is None:
         raise HTTPException(
             status_code=400,
             detail='Unknown upload_id - (re-)upload the catalog first.')
@@ -367,7 +446,7 @@ def run(payload: dict):
             # Timed from inside the lock, so a queued request reports its
             # own compute time rather than time spent waiting.
             t_run = time.perf_counter()
-            df = user_catalog.read_catalog(str(_UPLOADS[upload_id]))
+            df = user_catalog.read_catalog(str(catalog_path))
             target, info = user_catalog.build_target(
                 df, label=label,
                 rhalf_kpc=float(payload['rhalf_kpc']),

@@ -199,9 +199,16 @@ puts it all back.
 
 The catalog itself is deliberately not in the file — it can be
 hundreds of MB, and the point is to record what was *done to* a
-catalog. Instead each dataset records the file name and row count it
-was configured against, so after loading you re-upload the catalogs
-and the app reports which ones it expects. Column assignment and flag
+catalog. Each dataset does record the `upload_id` the server gave it,
+and loading tries that first: against the same server the catalog is
+picked straight back up with no re-upload, and an upload still on disk
+is found even if it has aged out of the in-memory cache or the process
+has since restarted against a persistent `--output-dir`. A settings
+file that has travelled to another machine simply misses, which is
+expected rather than an error — the dataset says so and every other
+setting is applied regardless. Each dataset also records the file name
+and row count it was configured against, so the app can tell you
+exactly which files to re-upload. Column assignment and flag
 cuts are reapplied automatically once the file arrives. If the file
 does not match what was saved, the column assignment is still restored
 where the names line up but the **manual star selection is dropped** —
@@ -214,6 +221,30 @@ with A, C, D loads as A, B, C), with every "same catalog as" and
 the one that was saved even though the ids differ. Round-tripping is
 exact: the request payload after a reload is byte-identical to the one
 before it.
+
+## Default axis ranges
+
+The profile panels open on a fixed view rather than fitted to the run,
+so two datasets — or two sessions — are directly comparable without
+the axes having moved underneath. The numbers are anchored on the
+dwarfs in the bundled local_volume_database snapshot, not chosen by
+eye:
+
+| panel | default | why |
+|---|---|---|
+| radius | 0.01–5 kpc | grid is 0.01–10; largest real `r_1/2` is 2.5 |
+| density | 1e4–1e11 M☉/kpc³ | mean ρ(<r_1/2) spans 1e5.7–1e9.9 |
+| enclosed mass | 1e3–1e10 M☉ | `M_1/2` spans 1e4.5–1e9.0 |
+| anisotropy β | −0.5 to 1 | hard model bounds |
+| σ_LOS | 0–30 km/s | covers all 45 measured dispersions (max 27.6) |
+| κ_LOS | 0–10 | 3 is the Gaussian value |
+
+The ρ and M windows carry about a decade of headroom each side of the
+measured spread, because those panels draw the whole profile and not
+just its value at `r_1/2`. β's bounds are not a choice: the prior has
+`df_beta0 >= -0.499` and Osipkov-Merritt anisotropy rises to 1 at
+large radius, so β cannot leave that interval. Every range is still
+editable per axis, and **Autoscale** fits to the data as before.
 
 ## Output units
 
