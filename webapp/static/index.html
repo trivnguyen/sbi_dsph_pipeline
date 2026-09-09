@@ -198,6 +198,13 @@
         CSV)</a>
       <span class="hint" style="margin:0">— every run stacked, with
         <code>label</code> and <code>model</code> columns.</span></p>
+    <div class="btnrow" id="figuresRow"
+         style="display:none; margin:8px 0 0">
+      <button class="secondary small" id="downloadFiguresBtn">
+        Download all figures (zip)</button>
+      <span class="hint" style="margin:0">— the profile panels, the
+        derived constraints, and one corner per dataset, as PNGs.</span>
+    </div>
 
     <fieldset id="displayBox" style="display:none">
       <legend>Display options</legend>
@@ -286,6 +293,48 @@
       Solid line = posterior median. Shaded bands = credible intervals
       (configure levels/colors above). Points = binned data. Dotted
       vertical line + diamond = Wolf radius / mass.</p>
+
+    <fieldset id="derivedBox" style="display:none">
+      <legend>Derived constraints</legend>
+      <label class="checkline" style="margin-bottom:8px">
+        <input type="checkbox" id="derived_show" checked>
+        Show derived-constraint panels</label>
+      <p class="hint" style="margin-top:0">Single-radius summaries of
+        the same posterior draws, histogrammed. Colors follow the
+        datasets; everything else here is independent of the profile
+        panels above.</p>
+      <div class="grid3" style="max-width:640px">
+        <label class="field"><span>Bins</span>
+          <input type="number" id="derived_bins" step="1" min="5"
+                 max="200" value="40"></label>
+        <label class="field"><span>Columns</span>
+          <input type="number" id="derived_cols" step="1" min="1"
+                 max="5" value="3"></label>
+        <label class="field"><span>Height per row [px]</span>
+          <input type="number" id="derived_rowh" step="10" min="120"
+                 max="600" value="230"></label>
+      </div>
+      <div class="grid3" style="max-width:640px; margin-top:8px">
+        <label class="checkline"><input type="checkbox"
+          id="derived_fill" checked> Filled histograms</label>
+        <label class="checkline"><input type="checkbox"
+          id="derived_median" checked> Median lines</label>
+        <label class="checkline"><input type="checkbox"
+          id="derived_wolf" checked> Wolf mass on M(r½)</label>
+      </div>
+    </fieldset>
+
+    <div class="btnrow" id="derivedToolbar"
+         style="display:none; justify-content:flex-end; margin:0 0 6px">
+      <button id="copyDerivedBtn" class="secondary small">
+        Copy plot image</button>
+    </div>
+    <div id="derivedPlot" style="display:none"></div>
+    <p class="hint" id="derivedCaption" style="display:none">
+      r½ = (4/3)·R_half, the deprojected half-light radius Wolf et al.
+      2010 quote M½ at — so the diamond/band is directly comparable to
+      the histogram beside it. ρ₁₅₀ and Γ₁₅₀ are at a fixed 150 pc, the
+      scale the literature compares dwarfs of different sizes at.</p>
 
     <fieldset id="cornerBox" style="display:none">
       <legend>Corner plot</legend>
@@ -1891,17 +1940,22 @@ async function copyPngBlob(blob, btn) {
   }
 }
 
-async function copyProfilePlot(btn) {
-  const gd = $('profilesPlot');
+// Render any Plotly graph div to a PNG at 2x, as a data URL.
+async function plotPngUrl(gd) {
+  if (!gd || !gd._fullLayout) return null;
+  return Plotly.toImage(gd, {
+    format: 'png', scale: 2,
+    width: gd._fullLayout.width, height: gd._fullLayout.height });
+}
+
+async function copyPlotImage(gd, btn, what) {
   if (!gd || !gd._fullLayout) return;
   try {
-    const url = await Plotly.toImage(gd, {
-      format: 'png', scale: 2,
-      width: gd._fullLayout.width, height: gd._fullLayout.height });
+    const url = await plotPngUrl(gd);
     await copyPngBlob(await (await fetch(url)).blob(), btn);
   } catch (e) {
     flashButton(btn, 'Copy failed');
-    showError('Could not render the plot image: ' + e.message);
+    showError(`Could not render the ${what} image: ` + e.message);
   }
 }
 
@@ -1947,6 +2001,293 @@ async function updateCorners() {
     showError(e.message);
   }
   btn.disabled = false;
+}
+
+// --- figure export -------------------------------------------------------
+// A minimal STORE-only zip writer. The bundle has no network access,
+// so pulling in a zip library is not an option; PNGs are already
+// compressed, so storing them uncompressed costs almost nothing.
+function crc32(bytes) {
+  let table = crc32._table;
+  if (!table) {
+    table = crc32._table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      table[i] = c >>> 0;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    c = table[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function zipStore(files) {
+  const enc = new TextEncoder();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const crc = crc32(f.bytes);
+    const size = f.bytes.length;
+
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true);
+    lh.setUint16(4, 20, true);
+    lh.setUint32(14, crc, true);
+    lh.setUint32(18, size, true);
+    lh.setUint32(22, size, true);
+    lh.setUint16(26, name.length, true);
+    parts.push(new Uint8Array(lh.buffer), name, f.bytes);
+
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true);
+    cd.setUint16(4, 20, true);
+    cd.setUint16(6, 20, true);
+    cd.setUint32(16, crc, true);
+    cd.setUint32(20, size, true);
+    cd.setUint32(24, size, true);
+    cd.setUint16(28, name.length, true);
+    cd.setUint32(42, offset, true);
+    central.push(new Uint8Array(cd.buffer), name);
+
+    offset += 30 + name.length + size;
+  }
+  const cdSize = central.reduce((t, c) => t + c.length, 0);
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, files.length, true);
+  eocd.setUint16(10, files.length, true);
+  eocd.setUint32(12, cdSize, true);
+  eocd.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(eocd.buffer)],
+    { type: 'application/zip' });
+}
+
+async function pngBytes(url) {
+  const buf = await (await fetch(url)).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+function safeName(text) {
+  return String(text).replace(/[^A-Za-z0-9._-]+/g, '_') || 'run';
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Everything currently on screen, in one archive: the profile panels,
+// the derived-constraint panels, and one corner per dataset. Hidden
+// panels are skipped rather than rendered invisibly, so the zip holds
+// what you were actually looking at.
+async function downloadAllFigures(btn) {
+  const files = [];
+  try {
+    for (const [gd, name] of [[$('profilesPlot'), 'profiles.png'],
+                              [$('derivedPlot'),
+                               'derived_constraints.png']]) {
+      if (!gd || gd.style.display === 'none') continue;
+      const url = await plotPngUrl(gd);
+      if (url) files.push({ name, bytes: await pngBytes(url) });
+    }
+    for (const img of document.querySelectorAll('#cornerRow img')) {
+      if (!img.src || img.offsetParent === null) continue;
+      const ds = img.dataset.ds;
+      const entry = PLOT.active.find((a) => a.ds === ds);
+      files.push({
+        name: `corner_${ds}_${safeName(entry ? entry.label : ds)}.png`,
+        bytes: await pngBytes(img.src),
+      });
+    }
+    if (!files.length) {
+      flashButton(btn, 'Nothing to save');
+      return;
+    }
+    downloadBlob(zipStore(files), 'dsph_explorer_figures.zip');
+    flashButton(btn, `Saved ${files.length}`);
+  } catch (e) {
+    flashButton(btn, 'Save failed');
+    showError('Could not build the figure archive: ' + e.message);
+  }
+}
+
+// --- derived-constraint panels -------------------------------------------
+// Single-radius summaries of the same draws the profile panels show,
+// histogrammed rather than plotted against radius. Independent of the
+// profile panels in every way except the series colors, which are
+// shared so a dataset is the same color everywhere on the page.
+const DERIVED_PANELS = [
+  ['m_half', 'log₁₀ M(r½) [M☉]', true],
+  ['rho_half', 'log₁₀ ρ(r½) [M☉/kpc³]', true],
+  ['gamma_half', 'Γ(r½) = dlnρ/dlnr', false],
+  ['rho_150', 'log₁₀ ρ(150 pc) [M☉/kpc³]', true],
+  ['gamma_150', 'Γ(150 pc)', false],
+];
+
+function seriesColor(ds) {
+  const el = $(ds + '_color');
+  return el ? el.value : (DS_USER_COLOR[ds] || DS_COLOR[ds]);
+}
+
+// Finite values for one panel, already in the axis's own units - the
+// mass and density panels are histogrammed in log10, which is how
+// these quantities are quoted and keeps a multi-decade posterior
+// legible.
+function derivedValues(a, key, isLog) {
+  const raw = (a.derived && a.derived[key]) || [];
+  const out = [];
+  for (const x of raw) {
+    if (x == null || !isFinite(x)) continue;
+    if (!isLog) out.push(x);
+    else if (x > 0) out.push(Math.log10(x));
+  }
+  return out;
+}
+
+// Equal-width bins over a range shared by every dataset in the panel,
+// so two histograms drawn together are actually comparable.
+function histogramCounts(values, lo, hi, nbins) {
+  const counts = new Array(nbins).fill(0);
+  const width = (hi - lo) / nbins;
+  if (!(width > 0)) return { centers: [], counts: [], width: 0 };
+  for (const v of values) {
+    let k = Math.floor((v - lo) / width);
+    if (k < 0 || k > nbins) continue;
+    if (k === nbins) k = nbins - 1;   // right edge lands in the last bin
+    counts[k] += 1;
+  }
+  const centers = counts.map((_, i) => lo + (i + 0.5) * width);
+  return { centers, counts, width };
+}
+
+async function renderDerived() {
+  const gd = $('derivedPlot');
+  const on = PLOT.active.length && $('derived_show').checked;
+  for (const id of ['derivedPlot', 'derivedToolbar', 'derivedCaption']) {
+    $(id).style.display = !on ? 'none'
+      : (id === 'derivedToolbar' ? 'flex' : 'block');
+  }
+  if (!on) { Plotly.purge(gd); return; }
+
+  const nbins = Math.max(5, Math.min(200,
+    parseInt($('derived_bins').value, 10) || 40));
+  const cols = Math.max(1, Math.min(5,
+    parseInt($('derived_cols').value, 10) || 3));
+  const rowh = Math.max(120, Math.min(600,
+    parseInt($('derived_rowh').value, 10) || 230));
+  const fill = $('derived_fill').checked;
+  const showMedian = $('derived_median').checked;
+  const showWolf = $('derived_wolf').checked;
+  const rows = Math.ceil(DERIVED_PANELS.length / cols);
+
+  const traces = [];
+  const shapes = [];
+  const annotations = [];
+  const layout = {
+    grid: { rows, columns: cols, pattern: 'independent',
+            xgap: 0.22, ygap: 0.34 },
+    height: rows * rowh + 60,
+    margin: { l: 60, r: 16, t: 30, b: 50 },
+    barmode: 'overlay', bargap: 0.02,
+    showlegend: false, hovermode: 'closest',
+    paper_bgcolor: '#fff', plot_bgcolor: '#fff',
+  };
+
+  DERIVED_PANELS.forEach(([key, title, isLog], pi) => {
+    const n = pi + 1;
+    const xk = layKey('xaxis', n), yk = layKey('yaxis', n);
+    const axSuffix = n === 1 ? '' : String(n);
+    const per = PLOT.active.map((a) => derivedValues(a, key, isLog));
+    const all = per.flat();
+    let lo = Math.min(...all), hi = Math.max(...all);
+    if (!isFinite(lo) || !isFinite(hi) || hi <= lo) {
+      lo = (lo || 0) - 0.5; hi = (hi || 0) + 0.5;
+    } else {
+      const pad = 0.03 * (hi - lo);
+      lo -= pad; hi += pad;
+    }
+
+    PLOT.active.forEach((a, ai) => {
+      const color = seriesColor(a.ds);
+      const h = histogramCounts(per[ai], lo, hi, nbins);
+      traces.push({
+        type: 'bar', x: h.centers, y: h.counts,
+        width: h.width, xaxis: 'x' + axSuffix, yaxis: 'y' + axSuffix,
+        marker: fill
+          ? { color: hexToRgba(color, 0.45),
+              line: { color: color, width: 0.5 } }
+          : { color: 'rgba(0,0,0,0)',
+              line: { color: color, width: 1.4 } },
+        name: a.label, hovertemplate: `${a.label}<br>%{x:.3f}<br>`
+          + '%{y} draws<extra></extra>',
+      });
+      if (showMedian && per[ai].length) {
+        const sorted = per[ai].slice().sort((u, v) => u - v);
+        shapes.push({
+          type: 'line', xref: 'x' + axSuffix, yref: 'y' + axSuffix + ' domain',
+          x0: percentileSorted(sorted, 50), x1: percentileSorted(sorted, 50),
+          y0: 0, y1: 1,
+          line: { color: color, width: 1.6, dash: 'solid' },
+        });
+      }
+    });
+
+    // The Wolf estimate belongs only on the mass panel, and only there
+    // because r½ was chosen to match the radius Wolf writes it at.
+    if (key === 'm_half' && showWolf) {
+      PLOT.active.forEach((a) => {
+        const w = a.wolf;
+        if (!w || !(w.mass_median > 0)) return;
+        const color = seriesColor(a.ds);
+        const mid = Math.log10(w.mass_median);
+        const left = w.mass_median - w.mass_em;
+        const band = [left > 0 ? Math.log10(left) : mid,
+                      Math.log10(w.mass_median + w.mass_ep)];
+        shapes.push({
+          type: 'rect', xref: 'x' + axSuffix,
+          yref: 'y' + axSuffix + ' domain',
+          x0: band[0], x1: band[1], y0: 0, y1: 1,
+          fillcolor: hexToRgba(color, 0.10), line: { width: 0 },
+          layer: 'below',
+        });
+        shapes.push({
+          type: 'line', xref: 'x' + axSuffix,
+          yref: 'y' + axSuffix + ' domain',
+          x0: mid, x1: mid, y0: 0, y1: 1,
+          line: { color: color, width: 1.6, dash: 'dot' },
+        });
+      });
+    }
+
+    layout[xk] = {
+      title: { text: title, font: { size: 12 } },
+      gridcolor: '#eceef2', zeroline: false, range: [lo, hi],
+    };
+    layout[yk] = {
+      title: { text: 'draws', font: { size: 11 } },
+      gridcolor: '#eceef2', zeroline: false, rangemode: 'tozero',
+    };
+  });
+
+  layout.shapes = shapes;
+  layout.annotations = annotations;
+  await Plotly.newPlot(gd, traces, layout,
+    { displaylogo: false, responsive: true,
+      toImageButtonOptions: { format: 'png', scale: 2,
+                              filename: 'derived_constraints' } });
 }
 
 // --- settings save / load ------------------------------------------------
@@ -2291,13 +2632,15 @@ async function renderResults(datasets) {
     jobs.length > 1 ? 'block' : 'none';
   $('downloadAllLink').href =
     '/api/posteriors?jobs=' + encodeURIComponent(jobs.join(','));
+  $('figuresRow').style.display = shown.length ? 'flex' : 'none';
   buildColorRows();
-  for (const id of ['displayBox', 'layoutBox', 'axisBox',
+  for (const id of ['displayBox', 'layoutBox', 'axisBox', 'derivedBox',
                     'cornerBox', 'plotCaption']) {
     $(id).style.display = shown.length ? 'block' : 'none';
   }
   $('plotToolbar').style.display = shown.length ? 'flex' : 'none';
   await renderPlot();
+  await renderDerived();
   $('cornerRow').innerHTML = shown.map((ds) =>
     `<div class="corner-col"><h3 style="color:${DS_COLOR[ds]}">
        ${ST[ds].result.summary.label} — posterior corner
@@ -2334,7 +2677,8 @@ async function onRun() {
         sorted[key] = sortColumns(pr.samples[key]);
       }
       active.push({ ds, label: r.summary.label, r: pr.r_kpc,
-        sorted: sorted, binned: pr.binned, wolf: pr.wolf });
+        sorted: sorted, binned: pr.binned, wolf: pr.wolf,
+        derived: pr.derived });
     }
     PLOT.active = active;
     await renderResults(datasets);
@@ -2529,10 +2873,14 @@ function initDatasets() {
   $('paletteSel').addEventListener('change', (e) => {
     applyPalette(e.target.value);
     buildColorRows();
+    if (PLOT.active.length) renderDerived();
   });
   $('dsColorRows').addEventListener('input', (e) => {
     const m = /^([A-H])_color$/.exec(e.target.id || '');
-    if (m) DS_USER_COLOR[m[1]] = e.target.value;
+    if (m) {
+      DS_USER_COLOR[m[1]] = e.target.value;
+      if (PLOT.active.length) renderDerived();
+    }
   });
 
   $('runBtn').addEventListener('click', onRun);
@@ -2546,13 +2894,24 @@ function initDatasets() {
   }
   // Corner styling hits the backend, so it applies on an explicit
   // button; only show/hide is instant.
+  for (const ev of ['input', 'change']) {
+    $('derivedBox').addEventListener(ev, () => {
+      if (PLOT.active.length) renderDerived();
+    });
+  }
+  $('downloadFiguresBtn').addEventListener('click',
+    (e) => downloadAllFigures(e.currentTarget));
+  $('copyDerivedBtn').addEventListener('click',
+    (e) => copyPlotImage($('derivedPlot'), e.currentTarget,
+                         'derived constraints'));
   $('corner_show').addEventListener('change', applyCornerVisibility);
   $('updateCornerBtn').addEventListener('click', updateCorners);
 
   // Copy plot images to the clipboard. The corner row is rebuilt each
   // run, so its buttons are handled by delegation.
   $('copyPlotBtn').addEventListener('click',
-    (e) => copyProfilePlot(e.currentTarget));
+    (e) => copyPlotImage($('profilesPlot'), e.currentTarget,
+                         'profile plot'));
   $('cornerRow').addEventListener('click', (e) => {
     const btn = e.target.closest('.copy-corner');
     if (btn) copyCornerImage(btn.dataset.ds, btn);

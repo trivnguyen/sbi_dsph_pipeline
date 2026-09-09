@@ -222,6 +222,42 @@ the one that was saved even though the ids differ. Round-tripping is
 exact: the request payload after a reload is byte-identical to the one
 before it.
 
+## Derived constraints
+
+A second figure below the profile panels histograms five single-radius
+summaries of the same posterior, with its own controls (bins, columns,
+row height, fill/step, median lines) independent of the profile panels
+— only the series colors are shared, so a dataset looks the same
+everywhere on the page:
+
+| panel | radius |
+|---|---|
+| `M(r½)` | (4/3)·R_half |
+| `ρ(r½)` | (4/3)·R_half |
+| `Γ(r½) = dlnρ/dlnr` | (4/3)·R_half |
+| `ρ(150 pc)` | fixed 150 pc |
+| `Γ(150 pc)` | fixed 150 pc |
+
+r½ is the *deprojected* half-light radius, which is the radius Wolf et
+al. 2010 write M½ at — that is why the Wolf estimate can be drawn on
+the mass panel (dotted line + band) as a like-for-like comparison
+rather than an approximate one. ρ₁₅₀ and Γ₁₅₀ sit at a fixed physical
+150 pc, the scale the literature uses to compare dwarfs of different
+sizes.
+
+The log slope is `GeneralizedOMJeans.rho_log_slope`, analytic for the
+generalized-NFW form, so it is not a finite difference off the plotted
+grid. Unlike the profile bands these scalars are computed for **every**
+posterior draw rather than the `n_profile_samples` subsample: they are
+closed-form and cost ~0.014 ms a draw, against the Jeans integrals a
+profile row needs.
+
+**Download all figures (zip)** saves what is currently on screen — the
+profile panels, the derived-constraint panels, and one corner per
+dataset — as PNGs. The archive is built in the browser with a small
+store-only zip writer rather than a library, since a packaged bundle
+has no network access.
+
 ## Default axis ranges
 
 The profile panels open on a fixed view rather than fitted to the run,

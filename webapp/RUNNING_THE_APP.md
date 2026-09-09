@@ -111,6 +111,13 @@ I've also attached **`example_catalog.csv`** if you want to try the
 app out first before using your own data - use `R_half = 0.2` with
 it.
 
+Below the profile plot you also get a **derived constraints** figure:
+histograms of the mass, density and density slope at the half-light
+radius and at a fixed 150 pc, which is how these are usually quoted
+for dwarfs. The mass panel has the classical Wolf estimate drawn on
+it for comparison. **Download all figures** saves every plot on screen
+as PNGs in one zip.
+
 ## Stopping / restarting
 
 - To stop the app, go back to the terminal it's running in and press

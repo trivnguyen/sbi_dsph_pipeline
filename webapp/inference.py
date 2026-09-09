@@ -94,6 +94,15 @@ CORNER_LABELS = [
     for i, name in enumerate(prior.ALL_PARAM_NAMES)
 ]
 
+# Radius the literature quotes rho_150 / Gamma_150 at, so dwarfs of
+# different sizes are compared at one fixed physical scale.
+R_150_KPC = 0.15
+
+# Per-draw scalars the "derived constraints" panels histogram. Masses
+# in Msun, densities in Msun/kpc^3, slopes dimensionless.
+DERIVED_KEYS = ('m_half', 'rho_half', 'gamma_half',
+                'rho_150', 'gamma_150')
+
 # Stands in for r_a=inf: GeneralizedOMJeans.dbeta_dr divides by r_a**2,
 # so a literal inf produces 0 * inf = nan in kurtosis_los.
 _LARGE_FINITE_R_A_KPC = 1e6
@@ -277,6 +286,40 @@ def _theta_from_params(alp, bet, gam, r_s, r_a, beta0, rho_s, rh):
     ])
 
 
+def _derived_scalars(m, rhalf_kpc: float) -> dict:
+    """Single-radius summaries of one draw's density profile.
+
+    Two radii, each the one its literature uses:
+
+    * `r_1/2 = (4/3) R_half`, the deprojected half-light radius Wolf et
+      al. 2010 write their estimator at. Evaluating the mass there and
+      not at `R_half` is what makes `m_half` directly comparable to the
+      Wolf mass the app already plots beside it.
+    * 150 pc, where rho_150 and Gamma_150 are conventionally quoted so
+      that dwarfs of different sizes can be compared at a fixed
+      physical scale.
+
+    The log slope is `GeneralizedOMJeans.rho_log_slope`, which is
+    analytic for the generalized-NFW form, so nothing here is a finite
+    difference off the plotted grid.
+
+    Args:
+        m: A `GeneralizedOMJeans` built from this draw.
+        rhalf_kpc: The draw's projected half-light radius [kpc].
+
+    Returns:
+        The five scalars, densities in Msun/kpc^3 and masses in Msun.
+    """
+    r_half = (4.0 / 3.0) * rhalf_kpc
+    return dict(
+        m_half=float(m.M(r_half) * 1e7),
+        rho_half=float(m.rho(r_half) * 1e7),
+        gamma_half=float(m.rho_log_slope(r_half)),
+        rho_150=float(m.rho(R_150_KPC) * 1e7),
+        gamma_150=float(m.rho_log_slope(R_150_KPC)),
+    )
+
+
 def _jeans_worker(args):
     # Top-level so ProcessPoolExecutor can pickle it.
     i, row, r_vec = args
@@ -304,7 +347,7 @@ def calc_jeans_profiles(
         replace=False)
     n = len(idx)
     out = {name: np.zeros((n, len(r_vec)))
-           for name in ('rho', 'mass', 'beta', 'sigma', 'kappa')}
+           for name in PROFILE_KEYS}
 
     work = [(i, posterior[j], r_vec) for i, j in enumerate(idx)]
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
@@ -312,9 +355,38 @@ def calc_jeans_profiles(
         for fut in as_completed(futures):
             i, rho, mass, beta, sigma, kappa = fut.result()
             for name, values in zip(
-                    ('rho', 'mass', 'beta', 'sigma', 'kappa'),
-                    (rho, mass, beta, sigma, kappa)):
+                    PROFILE_KEYS, (rho, mass, beta, sigma, kappa)):
                 out[name][i] = values
+    return out
+
+
+def calc_derived_constraints(posterior: np.ndarray) -> dict:
+    """Single-radius summaries for *every* posterior draw.
+
+    Unlike the profile arrays these are not subsampled: they cost
+    ~0.014 ms a draw, being closed-form in the generalized-NFW
+    parameters, where a profile row needs the Jeans integrals. So the
+    histograms show the whole posterior rather than the few hundred
+    draws the profile bands are built from.
+
+    Args:
+        posterior: (N, 8) draws with every radius column already in
+            log10(r / kpc), i.e. to_physical_kpc output.
+
+    Returns:
+        dict of (N,) arrays, one per DERIVED_KEYS.
+    """
+    out = {name: np.zeros(len(posterior)) for name in DERIVED_KEYS}
+    for i, row in enumerate(np.asarray(posterior, dtype=float)):
+        alp, bet, gam, log_rdm, log_rhos, beta0, log_ra, log_rstar = row
+        theta = _theta_from_params(
+            alp=alp, bet=bet, gam=gam, r_s=10 ** log_rdm,
+            r_a=10 ** log_ra, beta0=beta0, rho_s=10 ** log_rhos,
+            rh=10 ** log_rstar)
+        scalars = _derived_scalars(
+            GeneralizedOMJeans(theta), 10 ** log_rstar)
+        for name in DERIVED_KEYS:
+            out[name][i] = scalars[name]
     return out
 
 
@@ -470,7 +542,7 @@ def _binned_points(profile: dict, value_key: str) -> dict:
 
 def profiles_payload(
     r_vec: np.ndarray, jeans: dict, vdisp_profile: dict,
-    vkurtosis_profile: dict, wolf: dict,
+    vkurtosis_profile: dict, wolf: dict, derived: dict,
 ) -> dict:
     """Assemble the interactive-profile JSON the frontend plots.
 
@@ -481,6 +553,7 @@ def profiles_payload(
         vkurtosis_profile: vkurtosis.calc_kurtosis_los_binned result.
         wolf: calc_wolf_mass result, plus a `literature` entry (see
             load_literature_mass_wolf).
+        derived: calc_derived_constraints result, over every draw.
 
     Returns:
         JSON-friendly dict: `r_kpc`; `samples`, the raw per-draw profile
@@ -497,6 +570,11 @@ def profiles_payload(
         r_kpc=r_vec.tolist(),
         samples={name: _round_sig(jeans[name]).tolist()
                  for name in PROFILE_KEYS},
+        # Per-draw scalars, histogrammed rather than plotted against
+        # radius. Sent raw so the frontend can rebin without a re-run.
+        derived={name: _round_sig(derived[name]).tolist()
+                 for name in DERIVED_KEYS},
+        r_150_kpc=R_150_KPC,
         binned=dict(
             sigma=_binned_points(vdisp_profile, 'sigma'),
             kappa=_binned_points(vkurtosis_profile, 'kappa'),

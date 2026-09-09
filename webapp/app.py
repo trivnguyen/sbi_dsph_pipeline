@@ -537,9 +537,13 @@ def run(payload: dict):
             _remember(_RESULTS, job_id,
                       dict(label=label, posterior=posterior,
                            model=entry['name']), _MAX_RESULTS)
+            # Over the whole posterior, not the profile subsample:
+            # these are closed-form and cost nothing next to the Jeans
+            # integrals, so the constraint histograms use every draw.
+            derived = inference.calc_derived_constraints(posterior)
             profiles = inference.profiles_payload(
                 inference.R_VEC_KPC, jeans, vdisp_profile,
-                vkurtosis_profile, wolf)
+                vkurtosis_profile, wolf, derived)
             walltime_sec = time.perf_counter() - t_run
     except HTTPException:
         raise
