@@ -2,7 +2,9 @@
 # submit.sh — submit train_npe.py to SLURM with per-run log bookkeeping.
 #
 # Usage:
-#   ./submit.sh <config.py> [--time=D-HH:MM:SS] [--partition=name] [...] [--config.field=value ...]
+#   ./submit.sh <config.py> [--time D-HH:MM:SS] [--partition name] [...] [--config.field=value ...]
+#   (--flag=value and --flag value are both accepted for the resource
+#   overrides below; --config.field=value must use the = form)
 #
 # Examples:
 #   ./submit.sh ../configs/train_8params.py
@@ -52,17 +54,24 @@ GPUS="${GPUS:-1}"
 CPUS="${CPUS:-24}"
 TIME="${TIME:-12:00:00}"
 
-# Trailing --flag=value overrides win over the env vars above; anything
-# else (e.g. --config.field=value) passes through to train_npe.py.
+# Trailing --flag=value or --flag value overrides win over the env vars
+# above; anything else (e.g. --config.field=value) passes through to
+# train_npe.py.
 REMAINING_ARGS=()
-for arg in "${EXTRA_ARGS[@]}"; do
+while [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; do
+    arg="${EXTRA_ARGS[0]}"
     case "$arg" in
-        --account=*)   ACCOUNT="${arg#*=}" ;;
-        --partition=*) PARTITION="${arg#*=}" ;;
-        --gpus=*)      GPUS="${arg#*=}" ;;
-        --cpus=*)      CPUS="${arg#*=}" ;;
-        --time=*)      TIME="${arg#*=}" ;;
-        *)             REMAINING_ARGS+=("$arg") ;;
+        --account=*)   ACCOUNT="${arg#*=}";   EXTRA_ARGS=("${EXTRA_ARGS[@]:1}") ;;
+        --partition=*) PARTITION="${arg#*=}"; EXTRA_ARGS=("${EXTRA_ARGS[@]:1}") ;;
+        --gpus=*)      GPUS="${arg#*=}";      EXTRA_ARGS=("${EXTRA_ARGS[@]:1}") ;;
+        --cpus=*)      CPUS="${arg#*=}";      EXTRA_ARGS=("${EXTRA_ARGS[@]:1}") ;;
+        --time=*)      TIME="${arg#*=}";      EXTRA_ARGS=("${EXTRA_ARGS[@]:1}") ;;
+        --account)     ACCOUNT="${EXTRA_ARGS[1]}";   EXTRA_ARGS=("${EXTRA_ARGS[@]:2}") ;;
+        --partition)   PARTITION="${EXTRA_ARGS[1]}"; EXTRA_ARGS=("${EXTRA_ARGS[@]:2}") ;;
+        --gpus)        GPUS="${EXTRA_ARGS[1]}";       EXTRA_ARGS=("${EXTRA_ARGS[@]:2}") ;;
+        --cpus)        CPUS="${EXTRA_ARGS[1]}";       EXTRA_ARGS=("${EXTRA_ARGS[@]:2}") ;;
+        --time)        TIME="${EXTRA_ARGS[1]}";       EXTRA_ARGS=("${EXTRA_ARGS[@]:2}") ;;
+        *)             REMAINING_ARGS+=("$arg"); EXTRA_ARGS=("${EXTRA_ARGS[@]:1}") ;;
     esac
 done
 EXTRA_ARGS=("${REMAINING_ARGS[@]}")
