@@ -43,7 +43,7 @@ import threading
 import time
 import traceback
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Optional
 
@@ -88,6 +88,72 @@ STATE = {}
 
 # One inference at a time (shared device); concurrent requests queue.
 _RUN_LOCK = threading.Lock()
+
+# Server log, mirrored into memory so the UI can show it. Bounded:
+# this is a debugging aid, not a log file, and a long-running server
+# should not grow a list forever. Lines carry a sequence number so the
+# frontend can poll for "what is new" without re-sending the whole
+# buffer or missing lines between polls.
+_LOG_LINES = deque(maxlen=2000)
+_LOG_LOCK = threading.Lock()
+_LOG_SEQ = 0
+
+
+class _TeeStream:
+    """Write-through wrapper that also records whole lines.
+
+    Everything the app reports - its own startup prints and uvicorn's
+    request lines alike - goes to stdout/stderr, so capturing at that
+    level catches all of it without having to route each source
+    through `logging` first.
+
+    Args:
+        stream: The underlying stream to keep writing to.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._partial = ''
+
+    def write(self, text: str) -> int:
+        self._stream.write(text)
+        # Hold back anything after the last newline: a progress line
+        # written in pieces should land in the buffer once, whole.
+        self._partial += text
+        if '\n' in self._partial:
+            *lines, self._partial = self._partial.split('\n')
+            _record_log_lines(lines)
+        return len(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def isatty(self) -> bool:
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _record_log_lines(lines) -> None:
+    """Append finished lines to the in-memory log.
+
+    Args:
+        lines: Text lines, without trailing newlines.
+    """
+    global _LOG_SEQ
+    with _LOG_LOCK:
+        for line in lines:
+            _LOG_SEQ += 1
+            _LOG_LINES.append((_LOG_SEQ, line[:2000]))
+
+
+def _install_log_capture() -> None:
+    """Mirror stdout and stderr into the in-memory log. Idempotent."""
+    if not isinstance(sys.stdout, _TeeStream):
+        sys.stdout = _TeeStream(sys.stdout)
+    if not isinstance(sys.stderr, _TeeStream):
+        sys.stderr = _TeeStream(sys.stderr)
 
 # Uploads are files on disk, so keep few. Results are one posterior
 # array each (~64 kB) and are kept far longer: the frontend reuses a
@@ -213,6 +279,30 @@ def list_models():
         models=[_entry_public(e) for e in STATE['models'].values()])
 
 
+@app.get('/api/logs')
+def get_logs(after: int = 0):
+    """Server log lines newer than `after`.
+
+    Args:
+        after: Highest sequence number the caller already has; 0 for
+            everything still buffered.
+
+    Returns:
+        `lines` (oldest first), `last` (pass back as `after` next
+        time), and `dropped`, true when the ring buffer has discarded
+        lines the caller never saw.
+    """
+    with _LOG_LOCK:
+        buffered = list(_LOG_LINES)
+    fresh = [(seq, text) for seq, text in buffered if seq > after]
+    oldest = buffered[0][0] if buffered else 0
+    return dict(
+        lines=[text for _, text in fresh],
+        last=fresh[-1][0] if fresh else after,
+        dropped=bool(after and oldest > after + 1),
+    )
+
+
 @app.get('/api/systems')
 def list_systems():
     """Known system keys from the local_volume_database snapshot, for
@@ -241,7 +331,7 @@ def get_meta(key: str):
         center_ra_deg=_val(meta.ra),
         center_dec_deg=_val(meta.dec),
         distance_kpc=_val(meta.distance),
-        pmra_masyr=_val(meta.pmra),
+        pmra_masyr=_val(meta.pmra_cosdec),
         pmdec_masyr=_val(meta.pmdec),
         vlos_systemic_kms=_val(meta.vlos_systemic),
         rhalf_kpc=_val(meta.rhalf_kpc),
@@ -954,6 +1044,7 @@ def main() -> None:
         import tempfile
         output_dir = Path(tempfile.mkdtemp(prefix='dsph_webapp_'))
 
+    _install_log_capture()
     specs = _build_specs(args)
     device = torch.device(args.device)
     models = OrderedDict(

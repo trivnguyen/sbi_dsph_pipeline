@@ -178,10 +178,17 @@
       Load settings</button>
     <input type="file" id="loadSettingsInput" accept=".json"
            style="display:none">
+    <button class="secondary" type="button" id="logToggleBtn">
+      Show server log</button>
     <span class="hint" style="margin:0">Every dataset is overplotted on
       the same panels. Add one per model to compare models on identical
       stars, or per selection to compare selections under one model.</span>
   </div>
+
+  <pre id="logPanel" style="display:none; max-height:260px;
+       overflow:auto; background:#0f1115; color:#d7dae0; padding:10px;
+       border-radius:6px; font-size:12px; line-height:1.45;
+       margin:0 0 14px; white-space:pre-wrap"></pre>
 
   <section id="datasets"></section>
 
@@ -2003,6 +2010,51 @@ async function updateCorners() {
   btn.disabled = false;
 }
 
+// --- server log ----------------------------------------------------------
+// Polled rather than streamed: the log is a debugging aid, and a poll
+// that only asks for lines after the last sequence number it saw costs
+// almost nothing and needs no connection kept open. Polling only runs
+// while the panel is visible.
+let LOG_AFTER = 0;
+let LOG_TIMER = null;
+
+async function pollLog() {
+  const panel = $('logPanel');
+  try {
+    const r = await api('/api/logs?after=' + LOG_AFTER);
+    if (r.dropped) {
+      panel.textContent += '… (older lines dropped from the buffer)\n';
+    }
+    if (r.lines.length) {
+      // Stick to the bottom only if the reader is already there, so
+      // scrolling back to read something is not yanked away.
+      const atBottom = panel.scrollHeight - panel.scrollTop
+        - panel.clientHeight < 40;
+      panel.textContent += r.lines.join('\n') + '\n';
+      if (atBottom) panel.scrollTop = panel.scrollHeight;
+    }
+    LOG_AFTER = r.last;
+  } catch (e) {
+    panel.textContent += 'log unavailable: ' + e.message + '\n';
+  }
+}
+
+function toggleLog() {
+  const panel = $('logPanel');
+  const showing = panel.style.display !== 'none';
+  if (showing) {
+    panel.style.display = 'none';
+    $('logToggleBtn').textContent = 'Show server log';
+    clearInterval(LOG_TIMER);
+    LOG_TIMER = null;
+    return;
+  }
+  panel.style.display = 'block';
+  $('logToggleBtn').textContent = 'Hide server log';
+  pollLog();
+  LOG_TIMER = setInterval(pollLog, 2000);
+}
+
 // --- figure export -------------------------------------------------------
 // A minimal STORE-only zip writer. The bundle has no network access,
 // so pulling in a zip library is not an option; PNGs are already
@@ -2899,6 +2951,7 @@ function initDatasets() {
       if (PLOT.active.length) renderDerived();
     });
   }
+  $('logToggleBtn').addEventListener('click', toggleLog);
   $('downloadFiguresBtn').addEventListener('click',
     (e) => downloadAllFigures(e.currentTarget));
   $('copyDerivedBtn').addEventListener('click',

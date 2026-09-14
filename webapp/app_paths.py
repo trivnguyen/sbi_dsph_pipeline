@@ -50,7 +50,8 @@ NPE_INFERENCE_DIR = Path(os.environ.get(
 # Trained runs live at <MODEL_WORKDIR>/<project>/<run_id>/. Same
 # variable name npe_infer.paths uses, so one export covers both.
 MODEL_WORKDIR = Path(os.environ.get(
-    'NPE_MODEL_WORKDIR', '/scratch/tvnguyen/trained_models/dsph_npe'))
+    'NPE_MODEL_WORKDIR',
+    '/scratch/tvnguyen/projects/sbi_dsph/trained_models/npe'))
 
 # The presence of a vendored package next to app.py is what tells a
 # bundle from a checkout.
@@ -116,8 +117,16 @@ def load_registry() -> dict[str, dict]:
         checkpoints = model_dir / 'checkpoints'
         if not (checkpoints / spec.checkpoint).is_file():
             continue
+        # prior_min/prior_max travel with the entry: app.py builds the
+        # box sample_posterior cuts against, and a model whose training
+        # prior is narrower than tsnpe's default (priorC) would
+        # otherwise keep draws it was never trained on.
+        bounds = {
+            key: dict(spec[key]) for key in ('prior_min', 'prior_max')
+            if spec.get(key) is not None
+        }
         registry[name] = dict(
             name=name, model_dir=checkpoints,
             checkpoint=spec.checkpoint,
-            radius_units=spec.radius_units, note=spec.note)
+            radius_units=spec.radius_units, note=spec.note, **bounds)
     return registry

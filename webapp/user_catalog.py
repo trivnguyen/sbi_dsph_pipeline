@@ -527,15 +527,20 @@ def _add_radius_columns(
     data: pd.DataFrame, mapping: dict, center_ra_deg: float,
     center_dec_deg: float, distance_kpc: float,
 ) -> pd.DataFrame:
-    """Return a copy of `data` with the derived radius columns, using
-    the same small-angle convention as the preprocessing step that
-    later recomputes R_proj for the surviving stars.
+    """Return a copy of `data` with the derived radius columns.
+
+    Uses `calc_projected_xy` and the same `sqrt(x^2 + y^2)` as
+    `data_utils.preprocess_kinematic_data`, which recomputes R_proj for
+    the surviving stars: a radius cut applied here has to mean the same
+    thing as the radius the run reports, or stars fall either side of a
+    boundary that moved.
     """
     data = data.copy()
-    data[RADIUS_KPC_COL] = data_utils.calc_projected_radius(
+    x_proj, y_proj = data_utils.calc_projected_xy(
         data[mapping['ra']].to_numpy().astype(float),
         data[mapping['dec']].to_numpy().astype(float),
         center_ra_deg, center_dec_deg, distance_kpc)
+    data[RADIUS_KPC_COL] = np.sqrt(x_proj ** 2 + y_proj ** 2)
     data[RADIUS_ARCMIN_COL] = np.rad2deg(
         data[RADIUS_KPC_COL].to_numpy() / distance_kpc) * 60.0
     return data
@@ -725,7 +730,7 @@ def build_target(
         ra=center_ra_deg * auni.deg,
         dec=center_dec_deg * auni.deg,
         distance=distance_kpc * auni.kpc,
-        pmra=(pmra_masyr or 0.0) * auni.mas / auni.yr,
+        pmra_cosdec=(pmra_masyr or 0.0) * auni.mas / auni.yr,
         pmdec=(pmdec_masyr or 0.0) * auni.mas / auni.yr,
         vlos_systemic=vlos_systemic_kms * auni.km / auni.s,
         rhalf_arcmin=np.nan * auni.arcmin,
@@ -736,12 +741,17 @@ def build_target(
         rhalf_kpc_ep=rhalf_kpc_ep * auni.kpc,
     )
 
-    ra, dec, _, vr_err, mem_prob, vlos, r_proj = (
-        data_utils.preprocess_kinematic_data(
-            ra, dec, vr, vr_err, mem_prob, meta,
-            vlos_abs_max=vlos_abs_max,
-            apply_perspective_corr=use_corr,
-        ))
+    # A long positional tuple that has grown over time - proper
+    # motions, tangential velocities and their errors were appended
+    # after this call was written. Take the leading fields by slice and
+    # R_proj by index so the next append does not break this again.
+    processed = data_utils.preprocess_kinematic_data(
+        ra, dec, vr, vr_err, mem_prob, meta,
+        vlos_abs_max=vlos_abs_max,
+        apply_perspective_corr=use_corr,
+    )
+    ra, dec, _, vr_err, mem_prob, vlos = processed[:6]
+    r_proj = processed[8]
     if len(ra) == 0:
         raise ValueError('All stars removed by NaN/vlos_abs_max cuts.')
 

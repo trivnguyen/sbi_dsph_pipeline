@@ -26,6 +26,7 @@ app.py carries it alongside the flow it belongs to.
 
 import json
 import logging
+import multiprocessing
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -332,6 +333,36 @@ def _jeans_worker(args):
             np.sqrt(m.sigma2_los(r_vec)), m.kurtosis_los(r_vec))
 
 
+_POOL_CONTEXT = None
+
+
+def _pool_context():
+    """Start method for the Jeans pool: 'forkserver', not 'fork'.
+
+    The default on Linux is fork, and by the time this pool is built
+    the request has already run the flow, so torch's intra-op thread
+    pool exists. Forking a process with live threads leaves the child
+    holding locks no thread will ever release, and the workers hang
+    forever - which looks exactly like a slow run, since they sit at
+    100% CPU. Measured here: fork alone is fine, fork after a single
+    torch matmul never returns.
+
+    forkserver forks from a small clean process started before any of
+    that, so the children never inherit torch's threads. Preloading
+    this module means the forkserver has already imported it and the
+    per-request cost is a plain fork: ~5 s once, then ~0.08 s, against
+    ~7 s *every* request under 'spawn'.
+
+    Returns:
+        The multiprocessing context to build the pool with.
+    """
+    global _POOL_CONTEXT
+    if _POOL_CONTEXT is None:
+        multiprocessing.set_forkserver_preload([__name__])
+        _POOL_CONTEXT = multiprocessing.get_context('forkserver')
+    return _POOL_CONTEXT
+
+
 def calc_jeans_profiles(
     posterior: np.ndarray, r_vec: np.ndarray, n_samples: int,
     n_workers: int,
@@ -350,7 +381,8 @@ def calc_jeans_profiles(
            for name in PROFILE_KEYS}
 
     work = [(i, posterior[j], r_vec) for i, j in enumerate(idx)]
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+    with ProcessPoolExecutor(max_workers=n_workers,
+                             mp_context=_pool_context()) as pool:
         futures = [pool.submit(_jeans_worker, w) for w in work]
         for fut in as_completed(futures):
             i, rho, mass, beta, sigma, kappa = fut.result()

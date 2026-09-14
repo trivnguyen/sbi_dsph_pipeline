@@ -30,7 +30,7 @@ more of those variables:
 
 ```bash
 export NPE_INFERENCE_DIR=~/projects/sbi_dsph/npe_inference
-export NPE_MODEL_WORKDIR=/scratch/tvnguyen/trained_models/dsph_npe
+export NPE_MODEL_WORKDIR=/scratch/tvnguyen/projects/sbi_dsph/trained_models/npe
 ```
 
 ## Run from the repo
@@ -62,11 +62,12 @@ rather than keeping a second copy, because a second list that drifted
 from the first would be invisible until the numbers were already
 wrong:
 
-| `--model`   | run                    | radii            |
-|-------------|------------------------|------------------|
-| `8p_priorA` | `8p_ZhaoPlumCOM`       | `kpc`   (priorA) |
-| `8p_v3`     | `8p_ZhaoPlumCOM_v3`    | `rstar` (priorB) |
-| `8p_v3_5M`  | `8p_ZhaoPlumCOM_v3_5M` | `rstar` (priorB) |
+| `--model`   | run                    | radii            | prior  |
+|-------------|------------------------|------------------|--------|
+| `8p_priorA` | `8p_ZhaoPlumCOM`       | `kpc`   (priorA) | default |
+| `8p_v3`     | `8p_ZhaoPlumCOM_v3`    | `rstar` (priorB) | default |
+| `8p_v3_5M`  | `8p_ZhaoPlumCOM_v3_5M` | `rstar` (priorB) | default |
+| `8p_v4`     | `8p_ZhaoPlumCOM_v4`    | `rstar` (priorC) | **own** |
 
 Radius units are a property of a checkpoint, not a setting, so they
 are not separately selectable at runtime: they travel with the model
@@ -77,12 +78,21 @@ inferred from either. Guessing wrong does not raise; it shifts
 `dm_log_rdm` by a factor of `r_star` and yields plausible-looking
 profiles — hence the one declaration, in one file.
 
+The prior box travels with the model for the same reason. Most of the
+family shares `tsnpe.prior`'s defaults, but priorC (`8p_v4`) is
+narrower on six of seven parameters, so its bounds are written out in
+the registry and carried through here — the box is what
+`sample_posterior` cuts draws against, and a box wider than the
+training prior keeps draws the flow never saw. `npe_inference/
+check_registry.py` verifies every entry against the `config.0.json` of
+the dataset it was trained on; run it after editing the registry.
+
 To serve a checkpoint that file does not list, name it by path and
 assert its convention yourself:
 
 ```bash
 python app.py \
-    --model-dir /scratch/tvnguyen/trained_models/dsph_npe/8p_ZhaoPlumCOM/sfaqzcwx/checkpoints \
+    --model-dir /scratch/tvnguyen/projects/sbi_dsph/trained_models/npe/8p_ZhaoPlumCOM/sfaqzcwx/checkpoints \
     --checkpoint-filename last.ckpt \
     --radius-units kpc
 ```
@@ -308,6 +318,19 @@ it is the part that carries information.
 
 - Runs are serialized behind a lock (one shared device); concurrent
   requests queue and simply take longer.
+- The Jeans-profile pool uses the `forkserver` start method, not the
+  Linux default `fork`. By the time it is built the request has
+  already run the flow, so torch's intra-op threads exist, and forking
+  a process with live threads leaves the children holding locks
+  nothing will release - they hang at 100% CPU, which reads as a run
+  that never finishes rather than as a crash. forkserver forks from a
+  clean process started beforehand; preloading `inference` keeps the
+  per-request cost to a plain fork (~5 s once, then ~0.08 s, against
+  ~7 s *every* request under `spawn`).
+- **Show server log** in the toolbar mirrors the server's stdout and
+  stderr - startup lines, uvicorn requests, tracebacks - into a panel,
+  polled while it is open. Bounded to the last 2000 lines; it is a
+  debugging aid, not a log file.
 - Axis ranges are mouse-driven now (drag to zoom, double-click to
   reset) — there is no server-side "replot" step.
 - The Jeans-profile worker count is a server-side setting

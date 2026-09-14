@@ -199,11 +199,12 @@ python train_npe.py --config configs/my_run.py
 
 Config fields worth knowing:
 
-- `config.workdir` — shared root across every run of every project (e.g.
-  `/scratch/$USER/trained_models/dsph_npe`), **not** project-specific.
-  Renamed from `.../trained_models/npe`; the older streams-era projects
-  (`4p`/`6p`/`9p_AAU*`, `9p_plumgamma`) were left behind under the old
-  name. `eval_utils.WORKDIR` reads the same root and honours
+- `config.workdir` — shared root across every run of every project
+  (`/scratch/$USER/projects/sbi_dsph/trained_models/npe`), **not**
+  project-specific. Moved there from `/scratch/$USER/trained_models/
+  dsph_npe`, and `.../trained_models/npe` before that; the older
+  streams-era projects (`4p`/`6p`/`9p_AAU*`) were left behind at those
+  paths. `eval_utils.WORKDIR` reads the same root and honours
   `NPE_MODEL_WORKDIR` if you need to point it back at one of those.
   `config.wandb_project` is the per-project name; `WandbLogger` nests
   `workdir/<wandb_project>/<run_id>/checkpoints/` on its own, so folding
