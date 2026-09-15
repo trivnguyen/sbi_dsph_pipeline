@@ -178,24 +178,24 @@
       Load settings</button>
     <input type="file" id="loadSettingsInput" accept=".json"
            style="display:none">
-    <button class="secondary" type="button" id="logToggleBtn">
-      Show server log</button>
     <span class="hint" style="margin:0">Every dataset is overplotted on
       the same panels. Add one per model to compare models on identical
       stars, or per selection to compare selections under one model.</span>
   </div>
 
-  <pre id="logPanel" style="display:none; max-height:260px;
-       overflow:auto; background:#0f1115; color:#d7dae0; padding:10px;
-       border-radius:6px; font-size:12px; line-height:1.45;
-       margin:0 0 14px; white-space:pre-wrap"></pre>
-
   <section id="datasets"></section>
 
   <div class="btnrow">
     <button id="runBtn" disabled>Run inference</button>
+    <button class="secondary" type="button" id="logToggleBtn">
+      Show run log</button>
     <span id="status"></span>
   </div>
+
+  <pre id="logPanel" style="display:none; max-height:260px;
+       overflow:auto; background:#0f1115; color:#d7dae0; padding:10px;
+       border-radius:6px; font-size:12px; line-height:1.45;
+       margin:8px 0 14px; white-space:pre-wrap"></pre>
   <pre id="error"></pre>
 
   <section id="results">
@@ -307,9 +307,9 @@
         <input type="checkbox" id="derived_show" checked>
         Show derived-constraint panels</label>
       <p class="hint" style="margin-top:0">Single-radius summaries of
-        the same posterior draws, histogrammed. Colors follow the
-        datasets; everything else here is independent of the profile
-        panels above.</p>
+        the same posterior draws, histogrammed. Colors and the
+        per-dataset show/hide ticks follow the profile panels;
+        everything else here is independent of them.</p>
       <div class="grid3" style="max-width:640px">
         <label class="field"><span>Bins</span>
           <input type="number" id="derived_bins" step="1" min="5"
@@ -322,8 +322,26 @@
                  max="600" value="230"></label>
       </div>
       <div class="grid3" style="max-width:640px; margin-top:8px">
-        <label class="checkline"><input type="checkbox"
-          id="derived_fill" checked> Filled histograms</label>
+        <label class="field"><span>Histogram style</span>
+          <select id="derived_style">
+            <option value="bars">Filled bars</option>
+            <option value="stepfill">Filled step</option>
+            <option value="step">Step outline</option>
+          </select></label>
+        <label class="field"><span>Fill opacity</span>
+          <input type="number" id="derived_opacity" step="0.05"
+                 min="0" max="1" value="0.45"></label>
+        <label class="field"><span>Outline width</span>
+          <input type="number" id="derived_linew" step="0.2" min="0"
+                 value="1.4"></label>
+      </div>
+      <div class="grid3" style="max-width:640px; margin-top:8px">
+        <label class="field"><span>Normalize</span>
+          <select id="derived_norm">
+            <option value="counts">Counts (draws)</option>
+            <option value="frac">Fraction of draws</option>
+            <option value="density">Density (unit area)</option>
+          </select></label>
         <label class="checkline"><input type="checkbox"
           id="derived_median" checked> Median lines</label>
         <label class="checkline"><input type="checkbox"
@@ -1390,9 +1408,8 @@ function displaySettings() {
   const colors = {}, show = {};
   for (const a of PLOT.active) {
     const c = $(a.ds + '_color');
-    const s = $(a.ds + '_show');
     colors[a.ds] = c ? c.value : DS_COLOR[a.ds];
-    show[a.ds] = s ? s.checked : true;
+    show[a.ds] = dsVisible(a.ds);
   }
   return {
     bands,
@@ -2044,13 +2061,13 @@ function toggleLog() {
   const showing = panel.style.display !== 'none';
   if (showing) {
     panel.style.display = 'none';
-    $('logToggleBtn').textContent = 'Show server log';
+    $('logToggleBtn').textContent = 'Show run log';
     clearInterval(LOG_TIMER);
     LOG_TIMER = null;
     return;
   }
   panel.style.display = 'block';
-  $('logToggleBtn').textContent = 'Hide server log';
+  $('logToggleBtn').textContent = 'Hide run log';
   pollLog();
   LOG_TIMER = setInterval(pollLog, 2000);
 }
@@ -2189,6 +2206,13 @@ const DERIVED_PANELS = [
   ['gamma_150', 'Γ(150 pc)', false],
 ];
 
+// One predicate for "is this dataset drawn", so the profile panels and
+// the derived histograms cannot disagree about a ticked-off dataset.
+function dsVisible(ds) {
+  const el = $(ds + '_show');
+  return !el || el.checked;
+}
+
 function seriesColor(ds) {
   const el = $(ds + '_color');
   return el ? el.value : (DS_USER_COLOR[ds] || DS_COLOR[ds]);
@@ -2225,9 +2249,34 @@ function histogramCounts(values, lo, hi, nbins) {
   return { centers, counts, width };
 }
 
+// Counts are what the binning produces; the other two modes make
+// datasets with different draw counts comparable.
+function scaleCounts(counts, width, norm) {
+  const n = counts.reduce((sum, c) => sum + c, 0);
+  if (!n || norm === 'counts') return counts;
+  if (norm === 'frac') return counts.map((c) => c / n);
+  return counts.map((c) => c / (n * width));
+}
+
+// Bin centers and heights as a closed staircase outline, so a step
+// histogram can be drawn (and filled) as an ordinary line trace.
+function staircase(centers, heights, width) {
+  const x = [], y = [];
+  centers.forEach((c, i) => {
+    x.push(c - width / 2, c + width / 2);
+    y.push(heights[i], heights[i]);
+  });
+  if (x.length) {
+    x.unshift(x[0]); y.unshift(0);
+    x.push(x[x.length - 1]); y.push(0);
+  }
+  return { x, y };
+}
+
 async function renderDerived() {
   const gd = $('derivedPlot');
-  const on = PLOT.active.length && $('derived_show').checked;
+  const active = PLOT.active.filter((a) => dsVisible(a.ds));
+  const on = active.length && $('derived_show').checked;
   for (const id of ['derivedPlot', 'derivedToolbar', 'derivedCaption']) {
     $(id).style.display = !on ? 'none'
       : (id === 'derivedToolbar' ? 'flex' : 'block');
@@ -2240,7 +2289,13 @@ async function renderDerived() {
     parseInt($('derived_cols').value, 10) || 3));
   const rowh = Math.max(120, Math.min(600,
     parseInt($('derived_rowh').value, 10) || 230));
-  const fill = $('derived_fill').checked;
+  const style = $('derived_style').value;
+  const alpha = Math.min(1, Math.max(0,
+    parseFloat($('derived_opacity').value)));
+  const linew = Math.max(0, parseFloat($('derived_linew').value));
+  const norm = $('derived_norm').value;
+  const yTitle = { counts: 'draws', frac: 'fraction of draws',
+                   density: 'density' }[norm] || 'draws';
   const showMedian = $('derived_median').checked;
   const showWolf = $('derived_wolf').checked;
   const rows = Math.ceil(DERIVED_PANELS.length / cols);
@@ -2262,7 +2317,7 @@ async function renderDerived() {
     const n = pi + 1;
     const xk = layKey('xaxis', n), yk = layKey('yaxis', n);
     const axSuffix = n === 1 ? '' : String(n);
-    const per = PLOT.active.map((a) => derivedValues(a, key, isLog));
+    const per = active.map((a) => derivedValues(a, key, isLog));
     const all = per.flat();
     let lo = Math.min(...all), hi = Math.max(...all);
     if (!isFinite(lo) || !isFinite(hi) || hi <= lo) {
@@ -2272,20 +2327,33 @@ async function renderDerived() {
       lo -= pad; hi += pad;
     }
 
-    PLOT.active.forEach((a, ai) => {
+    active.forEach((a, ai) => {
       const color = seriesColor(a.ds);
       const h = histogramCounts(per[ai], lo, hi, nbins);
-      traces.push({
-        type: 'bar', x: h.centers, y: h.counts,
-        width: h.width, xaxis: 'x' + axSuffix, yaxis: 'y' + axSuffix,
-        marker: fill
-          ? { color: hexToRgba(color, 0.45),
-              line: { color: color, width: 0.5 } }
-          : { color: 'rgba(0,0,0,0)',
-              line: { color: color, width: 1.4 } },
-        name: a.label, hovertemplate: `${a.label}<br>%{x:.3f}<br>`
-          + '%{y} draws<extra></extra>',
-      });
+      const y = scaleCounts(h.counts, h.width, norm);
+      const hover = `${a.label}<br>%{x:.3f}<br>%{y:.4g} ${yTitle}`
+        + '<extra></extra>';
+      if (style === 'bars') {
+        traces.push({
+          type: 'bar', x: h.centers, y: y,
+          width: h.width, xaxis: 'x' + axSuffix,
+          yaxis: 'y' + axSuffix,
+          marker: { color: hexToRgba(color, alpha),
+                    line: { color: color, width: linew } },
+          name: a.label, hovertemplate: hover,
+        });
+      } else {
+        const step = staircase(h.centers, y, h.width);
+        traces.push({
+          type: 'scatter', mode: 'lines', x: step.x, y: step.y,
+          xaxis: 'x' + axSuffix, yaxis: 'y' + axSuffix,
+          line: { color: color, width: Math.max(0.5, linew),
+                  shape: 'linear' },
+          fill: style === 'stepfill' ? 'tozeroy' : 'none',
+          fillcolor: hexToRgba(color, alpha),
+          name: a.label, hovertemplate: hover,
+        });
+      }
       if (showMedian && per[ai].length) {
         const sorted = per[ai].slice().sort((u, v) => u - v);
         shapes.push({
@@ -2300,7 +2368,7 @@ async function renderDerived() {
     // The Wolf estimate belongs only on the mass panel, and only there
     // because r½ was chosen to match the radius Wolf writes it at.
     if (key === 'm_half' && showWolf) {
-      PLOT.active.forEach((a) => {
+      active.forEach((a) => {
         const w = a.wolf;
         if (!w || !(w.mass_median > 0)) return;
         const color = seriesColor(a.ds);
@@ -2329,7 +2397,7 @@ async function renderDerived() {
       gridcolor: '#eceef2', zeroline: false, range: [lo, hi],
     };
     layout[yk] = {
-      title: { text: 'draws', font: { size: 11 } },
+      title: { text: yTitle, font: { size: 11 } },
       gridcolor: '#eceef2', zeroline: false, rangemode: 'tozero',
     };
   });
@@ -2927,12 +2995,13 @@ function initDatasets() {
     buildColorRows();
     if (PLOT.active.length) renderDerived();
   });
+  // Color and show/hide are the two display controls the derived
+  // panels share with the profiles, so they re-render both.
   $('dsColorRows').addEventListener('input', (e) => {
-    const m = /^([A-H])_color$/.exec(e.target.id || '');
-    if (m) {
-      DS_USER_COLOR[m[1]] = e.target.value;
-      if (PLOT.active.length) renderDerived();
-    }
+    const m = /^([A-H])_(color|show)$/.exec(e.target.id || '');
+    if (!m) return;
+    if (m[2] === 'color') DS_USER_COLOR[m[1]] = e.target.value;
+    if (PLOT.active.length) renderDerived();
   });
 
   $('runBtn').addEventListener('click', onRun);

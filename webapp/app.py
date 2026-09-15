@@ -98,14 +98,21 @@ _LOG_LINES = deque(maxlen=2000)
 _LOG_LOCK = threading.Lock()
 _LOG_SEQ = 0
 
+# uvicorn access line: ... "POST /api/run HTTP/1.1" 200 OK
+_ACCESS_LINE_RE = re.compile(r'"[A-Z]+ \S+ HTTP/[\d.]+" (\d{3})')
+
+# Seconds between kept tqdm frames. Matches the frontend poll, so the
+# panel gains about one progress line per refresh.
+_PROGRESS_EVERY_SEC = 2.0
+
 
 class _TeeStream:
     """Write-through wrapper that also records whole lines.
 
-    Everything the app reports - its own startup prints and uvicorn's
-    request lines alike - goes to stdout/stderr, so capturing at that
-    level catches all of it without having to route each source
-    through `logging` first.
+    Everything the compute path reports - tsnpe's prints and tqdm
+    bars, emcee, numpy/torch warnings - goes to stdout/stderr, so
+    capturing at that level catches all of it without having to route
+    each source through `logging` first.
 
     Args:
         stream: The underlying stream to keep writing to.
@@ -114,16 +121,44 @@ class _TeeStream:
     def __init__(self, stream):
         self._stream = stream
         self._partial = ''
+        self._last_frame = 0.0
 
     def write(self, text: str) -> int:
         self._stream.write(text)
         # Hold back anything after the last newline: a progress line
         # written in pieces should land in the buffer once, whole.
         self._partial += text
+        if '\r' in self._partial:
+            self._partial = self._take_progress_frame(self._partial)
         if '\n' in self._partial:
             *lines, self._partial = self._partial.split('\n')
             _record_log_lines(lines)
         return len(text)
+
+    def _take_progress_frame(self, buffered: str) -> str:
+        """Collapse tqdm redraws, keeping one frame every few seconds.
+
+        tqdm redraws with a carriage return and emits no newline until
+        the bar closes, so without this the whole bar sits in
+        `_partial` and the panel shows nothing at all while the slow
+        part of a run is happening. Recording every frame instead
+        would push everything else out of the ring buffer, so keep at
+        most one per poll interval and drop the rest.
+
+        Args:
+            buffered: Text holding at least one carriage return.
+
+        Returns:
+            What is left after the last carriage return.
+        """
+        *frames, rest = buffered.split('\r')
+        now = time.monotonic()
+        newest = next(
+            (f for f in reversed(frames) if f.strip()), '')
+        if newest and now - self._last_frame >= _PROGRESS_EVERY_SEC:
+            self._last_frame = now
+            _record_log_lines([newest])
+        return rest
 
     def flush(self) -> None:
         self._stream.flush()
@@ -138,14 +173,36 @@ class _TeeStream:
 def _record_log_lines(lines) -> None:
     """Append finished lines to the in-memory log.
 
+    Successful HTTP access lines are dropped: the panel is there to
+    show what the inference is doing, and uvicorn's request log both
+    buries that and feeds on itself, since polling this very buffer
+    logs a request per poll.
+
     Args:
         lines: Text lines, without trailing newlines.
     """
     global _LOG_SEQ
     with _LOG_LOCK:
         for line in lines:
+            hit = _ACCESS_LINE_RE.search(line)
+            if hit and hit.group(1)[0] in '23':
+                continue
             _LOG_SEQ += 1
             _LOG_LINES.append((_LOG_SEQ, line[:2000]))
+
+
+def _log_stage(message: str) -> None:
+    """Print one run-progress line, wall-clock stamped.
+
+    The panel is only useful if the compute path narrates itself: the
+    libraries doing the work print little between the slow steps, so
+    without these the reader cannot tell sampling from Jeans from a
+    hang.
+
+    Args:
+        message: What the run is about to do, or just finished.
+    """
+    print(f'[{time.strftime("%H:%M:%S")}] {message}', flush=True)
 
 
 def _install_log_capture() -> None:
@@ -536,6 +593,8 @@ def run(payload: dict):
             # Timed from inside the lock, so a queued request reports its
             # own compute time rather than time spent waiting.
             t_run = time.perf_counter()
+            _log_stage(f'run "{label}" on model {entry["name"]} '
+                       f'({entry["radius_units"]} radii)')
             df = user_catalog.read_catalog(str(catalog_path))
             target, info = user_catalog.build_target(
                 df, label=label,
@@ -567,6 +626,9 @@ def run(payload: dict):
 
             n_samples = int(payload.get('n_samples') or 1000)
             n_bins = int(payload.get('n_bins') or 4)
+            _log_stage(f'{len(target.vlos_kms)} member stars kept; '
+                       f'sampling {n_samples} posterior draws on '
+                       f'{STATE["device"]}')
             t_sample = time.perf_counter()
             # sample_posterior returns draws in the model's own radius
             # units and cuts them against the prior box in that space;
@@ -580,6 +642,7 @@ def run(payload: dict):
             sampling_sec = time.perf_counter() - t_sample
             posterior = inference.to_physical_kpc(
                 posterior_model_units, entry['radius_units'])
+            _log_stage(f'posterior done in {sampling_sec:.1f} s')
 
             # Optional rejection cut on the inner slope gamma. We keep
             # the requested sample count fixed and just drop the draws
@@ -599,6 +662,9 @@ def run(payload: dict):
                         f'[{gamma_min}, {gamma_max}]. Widen the range '
                         f'or increase the posterior-sample count.'))
 
+            _log_stage(f'{len(posterior)}/{n_requested} draws '
+                       f'survive the gamma cut; binned sigma/kappa '
+                       f'fits in {n_bins} bins')
             vdisp_profile = vdisp.calc_vdisp_los_binned(
                 target.R_proj_kpc, target.vlos_kms,
                 target.vlos_err_kms,
@@ -607,10 +673,15 @@ def run(payload: dict):
                 target.R_proj_kpc, target.vlos_kms,
                 target.vlos_err_kms,
                 nbins_min=n_bins, nbins_max=n_bins, verbose=False)
+            n_profile = int(payload.get('n_profile_samples') or 500)
+            _log_stage(f'Jeans profiles for {n_profile} draws on '
+                       f'{STATE["n_workers"]} workers')
+            t_jeans = time.perf_counter()
             jeans = inference.calc_jeans_profiles(
                 posterior, inference.R_VEC_KPC,
-                n_samples=int(payload.get('n_profile_samples') or 500),
-                n_workers=STATE['n_workers'])
+                n_samples=n_profile, n_workers=STATE['n_workers'])
+            _log_stage('Jeans done in '
+                       f'{time.perf_counter() - t_jeans:.1f} s')
 
             wolf = inference.calc_wolf_mass(
                 target.vlos_kms, target.vlos_err_kms, target.rhalf_kpc)
@@ -635,6 +706,8 @@ def run(payload: dict):
                 inference.R_VEC_KPC, jeans, vdisp_profile,
                 vkurtosis_profile, wolf, derived)
             walltime_sec = time.perf_counter() - t_run
+            _log_stage(f'run "{label}" finished in '
+                       f'{walltime_sec:.1f} s')
     except HTTPException:
         raise
     except ValueError as e:
