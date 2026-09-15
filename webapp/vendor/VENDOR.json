@@ -1,0 +1,30 @@
+{
+  "refreshed_at": "2026-09-15T14:22:21+00:00",
+  "packages": {
+    "tsnpe": {
+      "path": "/home/tvnguyen/projects/sbi_dsph/sbi_dsph_pipeline/tsnpe/tsnpe",
+      "commit": "90d94122560c61c3faf4cb18c3c02b46cf706a1e",
+      "dirty": false
+    },
+    "jgnn": {
+      "path": "/home/tvnguyen/projects/sbi_dsph/jgnn/jgnn",
+      "commit": "57ef79dfe03c456c39e38e802fe294c10ab64b86",
+      "dirty": false
+    },
+    "dsph_analysis": {
+      "path": "/home/tvnguyen/my_modules/dsph_analysis",
+      "commit": "4972598ecbc6a379c6cbd62e84f80fb2580a5ce3",
+      "dirty": false
+    },
+    "gh_alternative": {
+      "path": "/home/tvnguyen/my_modules/gh_alternative",
+      "commit": "0ff57e6faa9faaab9d4a95454cfef61a802c3668",
+      "dirty": false
+    }
+  },
+  "registry": {
+    "path": "/home/tvnguyen/projects/sbi_dsph/npe_inference",
+    "commit": "fd008663f25d2d0d8d1e23a3647195f31c3d1cb2",
+    "dirty": false
+  }
+}

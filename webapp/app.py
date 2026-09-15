@@ -18,9 +18,9 @@ one device.
 A model's radius-unit convention is *not* recorded in its checkpoint or
 its training config snapshot, and cannot be inferred from either, so it
 is never a free-standing runtime choice: it travels with the model it
-belongs to, declared once in npe_inference/configs/models.py (repo
-mode) or in models/<name>/model_spec.json (a bundle, written by
-package.py).
+belongs to, declared once in npe_inference/configs/models.py and
+snapshotted into vendor/registry.json (repo mode) or in
+models/<name>/model_spec.json (a bundle, written by package.py).
 --radius-units exists only for a checkpoint given by path, which no
 registry describes.
 
@@ -1052,11 +1052,11 @@ def _build_specs(args) -> list[dict]:
     if not registry:
         raise SystemExit(
             'No models to serve: no ./models or ./model directory next '
-            'to app.py, no --model-dir, and no usable registry at '
-            f'{app_paths.NPE_INFERENCE_DIR}/configs/models.py with '
-            f'checkpoints under {app_paths.MODEL_WORKDIR}. Point '
-            'NPE_INFERENCE_DIR / NPE_MODEL_WORKDIR at them, or pass '
-            '--model-dir with --radius-units.')
+            'to app.py, no --model-dir, and no registered checkpoint '
+            f'from {app_paths.REGISTRY_FILE} found under '
+            f'{app_paths.MODEL_WORKDIR}. Point NPE_MODEL_WORKDIR at '
+            'them, refresh the registry with `python vendor.py '
+            '--refresh`, or pass --model-dir with --radius-units.')
     if args.model:
         unknown = [m for m in args.model if m not in registry]
         if unknown:
@@ -1128,6 +1128,7 @@ def main() -> None:
         output_dir=output_dir, n_workers=max(1, args.profile_workers))
     print(f'[Server] Models: {", ".join(models)} '
           f'(default {STATE["default_model"]})')
+    print(f'[Server] Vendored: {app_paths.vendored_versions()}')
     print(f'[Server] Output dir: {output_dir}')
     print(f'[Server] http://{args.host}:{args.port}')
     uvicorn.run(app, host=args.host, port=args.port)

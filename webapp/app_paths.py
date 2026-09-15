@@ -1,51 +1,50 @@
 """Where this app imports `tsnpe`, `jgnn` and `dsph_analysis` from.
 
-Two mutually exclusive modes, and the distinction matters enough to
-live in one file rather than be repeated in each module that needs it:
+All three come from `vendor/` - the app's own committed copies - and
+from nowhere else. No checkout elsewhere on the machine is consulted,
+and neither is an editable install of any of them. Outside `vendor/`
+the app depends only on ordinary PyPI packages (torch, numpy, scipy,
+astropy, ...), which pin themselves through the environment.
 
-Bundle
-    `package.py` vendors the three packages next to `app.py`. Those
-    frozen copies are the *only* ones consulted - a bundle built on the
-    machine that also holds the repo must not quietly import the repo's
-    code, or testing the bundle locally would exercise the wrong
-    version of it.
+That is deliberate. Those three are research code under active
+development, and while the app imported them live, an improvement to
+one arrived in the running server the moment it was committed
+somewhere else, with nothing recording which version a result came
+from. A change to `dsph_analysis`'s Jeans solver did exactly that and
+cost a day of debugging an app that had not changed at all.
 
-Repo
-    This directory lives inside `sbi_dsph_pipeline`, so the pipeline's
-    `tsnpe` package is simply `../tsnpe` and moves with the checkout.
-    `dsph_analysis` is outside it and is located by absolute path;
-    that default matches this machine, and the environment variables
-    are named exactly as in `npe_inference/npe_infer/paths.py`, so a
-    checkout that moves costs an export rather than an edit here.
+So a dependency update is an explicit commit: `python vendor.py
+--refresh`, review, commit. `python vendor.py` reports what is
+vendored against what the live checkouts hold, without the server ever
+consulting them.
 
 `setup()` is idempotent and safe to call from any module at import
 time - whichever of `inference` and `user_catalog` is imported first
-does the work.
+does the work. A bundle built by `package.py` carries the same
+`vendor/` tree, so a bundle and a repo-mode server run byte-identical
+dependency code.
 
 `load_registry()` is the same idea applied to *models* rather than
-packages: in repo mode the set of switchable checkpoints is read from
-`npe_inference/configs/models.py` instead of being restated here,
-because a second list of radius-unit conventions that could drift from
-the first is exactly the failure `tsnpe/prior.py` warns about. A
-bundle carries one model and no registry.
+packages: the set of switchable checkpoints is read from
+`vendor/registry.json`, snapshotted from `npe_inference/configs/
+models.py` by the same `--refresh`. The checkpoints themselves are
+data, not code: they stay on the filesystem under `MODEL_WORKDIR`, and
+an entry whose checkpoint is not on this machine is dropped rather
+than failing startup.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 
-SBI_DSPH_PIPELINE_DIR = Path(os.environ.get(
-    'SBI_DSPH_PIPELINE_DIR', str(APP_DIR.parent)))
-MY_MODULES_DIR = Path(os.environ.get(
-    'MY_MODULES_DIR', '/home/tvnguyen/my_modules'))
-
-# The project holding configs/models.py, the registry of checkpoints
-# this app may be pointed at. Repo mode only.
-NPE_INFERENCE_DIR = Path(os.environ.get(
-    'NPE_INFERENCE_DIR',
-    str(SBI_DSPH_PIPELINE_DIR.parent / 'npe_inference')))
+# The app's private copies of the non-standard packages, and the
+# snapshot of the model registry beside them. Both written by
+# vendor.py; both checked in.
+VENDOR_DIR = APP_DIR / 'vendor'
+REGISTRY_FILE = VENDOR_DIR / 'registry.json'
 
 # Trained runs live at <MODEL_WORKDIR>/<project>/<run_id>/. Same
 # variable name npe_infer.paths uses, so one export covers both.
@@ -53,41 +52,69 @@ MODEL_WORKDIR = Path(os.environ.get(
     'NPE_MODEL_WORKDIR',
     '/scratch/tvnguyen/projects/sbi_dsph/trained_models/npe'))
 
-# The presence of a vendored package next to app.py is what tells a
-# bundle from a checkout.
-IS_BUNDLE = (APP_DIR / 'tsnpe').is_dir()
-
 
 def import_path() -> tuple[Path, ...]:
     """The directories to put on `sys.path`, highest priority first.
 
     Returns:
-        `(APP_DIR,)` in a bundle; the repo's `tsnpe` directory and the
-        `dsph_analysis` parent otherwise.
+        `(VENDOR_DIR,)` - the only place the app's non-PyPI imports
+        may come from.
     """
-    if IS_BUNDLE:
-        return (APP_DIR,)
-    return (SBI_DSPH_PIPELINE_DIR / 'tsnpe', MY_MODULES_DIR)
+    return (VENDOR_DIR,)
 
 
 def setup() -> None:
-    """Make `tsnpe`, `jgnn` and `dsph_analysis` importable. Idempotent."""
+    """Make `tsnpe`, `jgnn` and `dsph_analysis` importable. Idempotent.
+
+    Raises:
+        SystemExit: If `vendor/` is missing, which means the checkout
+            is incomplete - the app has no other source for them.
+    """
+    if not VENDOR_DIR.is_dir():
+        raise SystemExit(
+            f'No vendored packages at {VENDOR_DIR}. They are checked '
+            'in; a checkout without them is incomplete. Rebuild them '
+            'with `python vendor.py --refresh`.')
     for directory in reversed(import_path()):
         entry = str(directory)
         if directory.is_dir() and entry not in sys.path:
+            # Reason: position 0, so these win over anything else
+            # installed in the environment under the same name -
+            # including an editable install of jgnn, whose import hook
+            # would otherwise be consulted.
             sys.path.insert(0, entry)
+
+
+def vendored_versions() -> str:
+    """One line naming the commit each vendored package came from.
+
+    Printed at startup and recorded in the run log, so a result can be
+    traced to the dependency code that produced it.
+
+    Returns:
+        `'name abcd1234, ...'`, or a note if the manifest is missing.
+    """
+    manifest = VENDOR_DIR / 'VENDOR.json'
+    if not manifest.is_file():
+        return 'no VENDOR.json (run `python vendor.py --refresh`)'
+    packages = json.loads(manifest.read_text()).get('packages', {})
+    return ', '.join(
+        f'{name} {info.get("commit", "")[:8] or "no-git"}'
+        f'{"+dirty" if info.get("dirty") else ""}'
+        for name, info in packages.items())
 
 
 def load_registry() -> dict[str, dict]:
     """The checkpoints this server may switch between, by CLI name.
 
-    Read from `npe_inference/configs/models.py` rather than restated
-    here: that file is where a model's radius convention is asserted,
-    and it explains at length why the convention is a deliberate
-    per-model declaration and not something to be inferred. Two copies
-    of that list could disagree, and the symptom - `dm_log_rdm` off by
-    a factor of r_star - looks like a plausible number rather than an
-    error.
+    Read from `vendor/registry.json`, snapshotted from
+    `npe_inference/configs/models.py` - the file where a model's
+    radius convention is asserted, and which explains at length why
+    the convention is a deliberate per-model declaration and not
+    something to be inferred. It is copied verbatim rather than
+    restated: two hand-written copies could disagree, and the symptom
+    - `dm_log_rdm` off by a factor of r_star - looks like a plausible
+    number rather than an error.
 
     Entries whose checkpoint is not on this filesystem are dropped, so
     a registry naming runs that were never copied here still yields a
@@ -95,38 +122,29 @@ def load_registry() -> dict[str, dict]:
 
     Returns:
         `{name: {name, model_dir, checkpoint, radius_units, note}}`,
-        empty in a bundle (which carries exactly one model, described
-        by its own `model/model_spec.json`) or if the registry is not
-        importable from this machine.
+        plus `prior_min`/`prior_max` where the model declares them.
+        Empty if there is no snapshot (a bundle, which carries its
+        models described by their own `model_spec.json`).
     """
-    if IS_BUNDLE:
+    if not REGISTRY_FILE.is_file():
         return {}
-    entry = str(NPE_INFERENCE_DIR)
-    if not (NPE_INFERENCE_DIR / 'configs' / 'models.py').is_file():
-        return {}
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-    try:
-        from configs.models import MODELS
-    except ImportError:
-        return {}
+    models = json.loads(REGISTRY_FILE.read_text())
 
     registry = {}
-    for name, spec in MODELS.items():
-        model_dir = MODEL_WORKDIR / spec.project / spec.run_id
-        checkpoints = model_dir / 'checkpoints'
-        if not (checkpoints / spec.checkpoint).is_file():
+    for spec in models:
+        checkpoints = (MODEL_WORKDIR / spec['project'] / spec['run_id']
+                       / 'checkpoints')
+        if not (checkpoints / spec['checkpoint']).is_file():
             continue
         # prior_min/prior_max travel with the entry: app.py builds the
         # box sample_posterior cuts against, and a model whose training
         # prior is narrower than tsnpe's default (priorC) would
         # otherwise keep draws it was never trained on.
-        bounds = {
-            key: dict(spec[key]) for key in ('prior_min', 'prior_max')
-            if spec.get(key) is not None
-        }
-        registry[name] = dict(
-            name=name, model_dir=checkpoints,
-            checkpoint=spec.checkpoint,
-            radius_units=spec.radius_units, note=spec.note, **bounds)
+        bounds = {key: spec[key] for key in ('prior_min', 'prior_max')
+                  if spec.get(key) is not None}
+        registry[spec['name']] = dict(
+            name=spec['name'], model_dir=checkpoints,
+            checkpoint=spec['checkpoint'],
+            radius_units=spec['radius_units'], note=spec['note'],
+            **bounds)
     return registry

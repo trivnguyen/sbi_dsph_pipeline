@@ -12,24 +12,38 @@ deliberately self-contained: `inference.py` replaces
 `plotting/posterior_diagnostics.py` + `register_run.py` here so that
 `package.py` can ship the whole thing as a portable bundle.
 
-It imports the pipeline's `tsnpe` package from `../tsnpe`, which moves
-with the checkout, and `dsph_analysis` by absolute path since that one
-lives outside the repo. See `app_paths.py`, which is the single
-definition of both (and of the bundle's vendored copies, which
-deliberately do *not* fall back to the repo). The defaults match this
-machine and are overridable by the same environment variables
-`npe_inference/npe_infer/paths.py` uses:
+### Dependencies
+
+Outside PyPI, the app imports nothing but its own committed copies in
+`vendor/`: `tsnpe`, `jgnn`, `dsph_analysis` and `gh_alternative`. No
+checkout elsewhere on the machine is consulted, and neither is an
+editable install. `app_paths.py` is the single definition of that, and
+a bundle carries the same tree, so a bundle and a repo-mode server run
+byte-identical dependency code.
+
+That is deliberate. Those packages are research code under active
+development, and while the app imported them live, an improvement to
+one arrived in the running server the moment it was committed
+somewhere else, with nothing recording which version a result came
+from. A change to `dsph_analysis`'s Jeans solver did exactly that and
+cost a day of debugging an app that had not changed at all.
+
+Updating a dependency is therefore an explicit commit here:
 
 ```bash
-export MY_MODULES_DIR=~/my_modules
+python vendor.py              # vendored commits vs the live checkouts
+python vendor.py --refresh    # re-copy, then review the diff and commit
 ```
 
-The list of models it can serve comes from the same place the rest of
-the project's does, `npe_inference/configs/models.py`, found via two
-more of those variables:
+The server prints the vendored commits at startup, so a result can be
+traced to the code that produced it.
+
+The models themselves are data, not code: they stay on the filesystem,
+and `vendor/registry.json` (snapshotted from
+`npe_inference/configs/models.py` by the same `--refresh`) says which
+ones exist and under which radius convention.
 
 ```bash
-export NPE_INFERENCE_DIR=~/projects/sbi_dsph/npe_inference
 export NPE_MODEL_WORKDIR=/scratch/tvnguyen/projects/sbi_dsph/trained_models/npe
 ```
 
@@ -57,10 +71,11 @@ run jobs on this machine.
 
 ### The models, and their radius conventions
 
-`npe_inference/configs/models.py` is the authority; the app reads it
-rather than keeping a second copy, because a second list that drifted
-from the first would be invisible until the numbers were already
-wrong:
+`npe_inference/configs/models.py` is the authority; `vendor.py
+--refresh` copies it verbatim into `vendor/registry.json` rather than
+anyone keeping a second, hand-written list, because a list that
+drifted from the authority would be invisible until the numbers were
+already wrong:
 
 | `--model`   | run                    | radii            | prior  |
 |-------------|------------------------|------------------|--------|

@@ -34,7 +34,6 @@ Usage:
 
 import argparse
 import json
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -43,32 +42,12 @@ import numpy as np
 
 _WEBAPP_DIR = Path(__file__).resolve().parent
 
-# The `tsnpe` package to vendor comes from the checkout this file
-# sits in, overridable exactly as in app_paths.py and
-# npe_inference/npe_infer/paths.py.
-_PIPELINE_DIR = Path(os.environ.get(
-    'SBI_DSPH_PIPELINE_DIR', str(_WEBAPP_DIR.parent)))
-_REPO_TSNPE = _PIPELINE_DIR / 'tsnpe' / 'tsnpe'
+# The packages a bundle ships are the app's own vendored copies, not
+# whatever is installed on the build machine - see vendor.py.
+_VENDOR_DIR = _WEBAPP_DIR / 'vendor'
 
 _APP_FILES = ('app.py', 'app_paths.py', 'inference.py',
               'user_catalog.py')
-_TSNPE_MODULES = ('__init__.py', 'target.py', 'prior.py',
-                  'model_io.py', 'proposal.py')
-
-# jgnn's real __init__ also imports callbacks/datasets/training/utils,
-# which drag in wandb/h5py/tarp - none of it needed at inference time.
-_JGNN_INIT = '''"""Jeans GNN package (webapp bundle: models + transforms only).
-
-Trimmed by webapp/package.py from the full jgnn package - training,
-callbacks, and dataset modules (and their wandb/h5py dependencies) are
-not needed to run the pretrained model.
-"""
-
-from . import models
-from . import transforms
-
-__all__ = ['models', 'transforms']
-'''
 
 _REQUIREMENTS = '''\
 # Core inference stack. torch/torch-cluster often need a
@@ -444,23 +423,17 @@ def build(specs: list[dict], out: Path) -> None:
     for spec in specs:
         _copy_model(spec, out, inference)
 
-    # Vendored packages. jgnn/dsph_analysis are located via import so
-    # the script works regardless of how they're installed.
-    tsnpe_dst = out / 'tsnpe'
-    tsnpe_dst.mkdir()
-    for name in _TSNPE_MODULES:
-        shutil.copy(_REPO_TSNPE / name, tsnpe_dst / name)
-
-    import dsph_analysis
-    import jgnn
-    jgnn_src = Path(jgnn.__file__).parent
-    jgnn_dst = out / 'jgnn'
-    jgnn_dst.mkdir()
-    _copy_tree(jgnn_src / 'models', jgnn_dst / 'models')
-    _copy_tree(jgnn_src / 'transforms', jgnn_dst / 'transforms')
-    (jgnn_dst / '__init__.py').write_text(_JGNN_INIT)
-    _copy_tree(Path(dsph_analysis.__file__).parent,
-               out / 'dsph_analysis')
+    # The vendored packages, copied wholesale from webapp/vendor so a
+    # bundle runs the same dependency code the repo-mode server does -
+    # every package there, so vendoring a new one needs no edit here.
+    # VENDOR.json travels with them, so a bundle can still say which
+    # commits it was built from; the registry snapshot stays behind,
+    # since a bundle's models describe themselves through their own
+    # model_spec.json.
+    for src in sorted(_VENDOR_DIR.iterdir()):
+        if src.is_dir():
+            _copy_tree(src, out / 'vendor' / src.name)
+    shutil.copy(_VENDOR_DIR / 'VENDOR.json', out / 'vendor')
 
     # Support files.
     (out / 'requirements.txt').write_text(_REQUIREMENTS)

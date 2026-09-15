@@ -1,0 +1,52 @@
+[
+  {
+    "name": "8p_priorA",
+    "project": "8p_ZhaoPlumCOM",
+    "run_id": "sfaqzcwx",
+    "checkpoint": "last.ckpt",
+    "radius_units": "kpc",
+    "note": "priorA / 1M sims. The original 8-parameter baseline; the model every existing tsnpe run starts from."
+  },
+  {
+    "name": "8p_v3",
+    "project": "8p_ZhaoPlumCOM_v3",
+    "run_id": "f2wmrbwr",
+    "checkpoint": "last.ckpt",
+    "radius_units": "rstar",
+    "note": "priorB / 2M sims, 20 shards read."
+  },
+  {
+    "name": "8p_v3_5M",
+    "project": "8p_ZhaoPlumCOM_v3_5M",
+    "run_id": "g3ltat6r",
+    "checkpoint": "last.ckpt",
+    "radius_units": "rstar",
+    "note": "priorB / same dataset as 8p_v3, 50 shards read."
+  },
+  {
+    "name": "8p_v4",
+    "project": "8p_ZhaoPlumCOM_v4",
+    "run_id": "qvkcxqc1",
+    "checkpoint": "last.ckpt",
+    "radius_units": "rstar",
+    "note": "priorC / 21 of 24 shards read (~2.1M sims). Narrower prior than priorA and priorB on six of the seven parameters, so its bounds are given explicitly below - notably df_beta0 <= 0, which excludes radial central anisotropy outright.",
+    "prior_min": {
+      "df_beta0": -0.499,
+      "df_log_ra": -0.5,
+      "dm_alpha": 0.5,
+      "dm_beta": 2.5,
+      "dm_gamma": -0.5,
+      "dm_log_rdm": 0.0,
+      "dm_log_rho0": 5.0
+    },
+    "prior_max": {
+      "df_beta0": 0.0,
+      "df_log_ra": 3.0,
+      "dm_alpha": 3.0,
+      "dm_beta": 10.0,
+      "dm_gamma": 2.0,
+      "dm_log_rdm": 2.5,
+      "dm_log_rho0": 10.0
+    }
+  }
+]
