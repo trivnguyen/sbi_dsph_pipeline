@@ -20,28 +20,47 @@ configs/            per-run configs (git-ignored except the example)
 tsnpe/
   state.py       run-state manifest (state.json read/write; see below)
   target.py      load + hard-copy a target's observational data
-  prior.py       fixed 8-param prior box, rstar conditioning, and the
-                 radius-unit conversion (see "The prior is fixed")
+  prior.py       the run's prior box, built from a dsph_sims spec and
+                 pinned per run; rstar conditioning; box <-> model-unit
+                 maps (see "The prior comes from the model spec")
   proposal.py    TSNPE truncated-proposal sampler (real ICRS observation
                  in, truncated proposal out)
-  sims.py        Agama simulator + Cartesian HDF5 writer, same physics as
-                 npe/simulate_8params_process_priorA.py
+  sims.py        round >= 1 simulation through the run's dsph_sims spec
+                 (the same simulate/preprocess that built round 0) +
+                 Cartesian HDF5 writer
   model_io.py    rebuild an NPE model from a stored architecture config,
                  or a small fixed one for debug_model_config()
 register_run.py     one-time: register target + round-0 model
 simulate_round.py   round r >= 1: proposal sample + Agama simulate
 train_round.py      round r >= 1: fine-tune round r-1 on round r's data
+posterior_by_round.py
+                    round r >= 0: this run's posterior/profile plots for
+                    every trained round + the cross-round comparison
+                    (run_pipeline.sh calls it after each train)
 run_pipeline.sh      register once, then loop rounds
 
 check_posteriors.py       CLI: round-0 (amortized) posterior/profile checks
                           over every mock catalog on disk
-posterior_by_round.ipynb  notebook: posterior/profile checks across one
-                          TSNPE run's rounds (non-amortized - each round's
-                          own fine-tuned checkpoint)
+PLAN_light_profile_conditioning.md
+                          plan (not yet built) for running the 9p/10p/11p
+                          specs: multi-axis light-profile conditioning
+test_prior.py             self-check: Prior from spec == pinned == legacy
+                          keywords, box maps invert, sims.py == the spec's
+                          own simulate from the same agama seed
+                          (../dsph_sims/tests/test_specs.py holds the
+                          physics goldens)
+test_posterior_by_round.py
+                          self-check: posterior_by_round.py's round cache
+                          invalidates on settings/checkpoint change, and
+                          its per-round styling
+posterior_by_round.ipynb  notebook: the interactive form of
+                          posterior_by_round.py - same figures, run cell
+                          by cell
 ```
 
-`check_posteriors.py` (and, for other TSNPE runs, `posterior_by_round.ipynb`)
-shares its plotting/profile-computation logic via `../plotting/` (sibling to
+`check_posteriors.py`, `posterior_by_round.py` and
+`posterior_by_round.ipynb`
+share their plotting/profile-computation logic via `../plotting/` (sibling to
 `tsnpe/`, alongside `npe/`) - it lives outside `tsnpe/` since none of it is
 TSNPE-specific. The interactive explorer lives there too, since it isn't
 tied to TSNPE either (it drives the amortized round-0 model directly):
@@ -130,6 +149,101 @@ and round — so changing any of them draws fresh instead of silently
 simulating a different distribution. Delete the round's `.npy` files to
 force a redraw.
 
+## Per-round diagnostics
+
+`posterior_by_round.py` draws each trained round's own posterior at the
+run's fixed observation and writes, into `<run_dir>/diagnostics/`:
+
+```
+round_<r>_corner.png    that round's posterior, in the model's radius units
+round_<r>_profiles.png  that round's 5 Jeans profiles vs. the binned data
+rounds_corner.png       every round's posterior, overlaid
+rounds_profiles.png     every round's profiles, overlaid (3x2, legend in
+                        the spare cell)
+rounds_convergence.png  marginal median +- 68% vs round, one panel per
+                        parameter, + the round's tau/acceptance
+rounds_summary.json     the same numbers, machine-readable
+round_<r>.npz           cached draws: `posterior` + the five *_samples
+                        arrays, plus the `settings` they were made with
+```
+
+`rounds_convergence.png` is the one that answers "did this round buy
+anything?", which overlaid posteriors are bad at: two rounds whose bands
+sit on top of each other look identical whether they agree to 1% or to
+30%. Each panel is pinned to that parameter's own prior range, so the
+bar's height against the panel's is the fraction of the prior the
+posterior still occupies, and each title carries two numbers:
+
+- `last/r0` - the final round's 68% width over round 0's. Near 1 means
+  the rounds changed nothing.
+- `prior` - the 68% width over the prior's own 68% range. Near 1 means
+  the data never constrained that parameter, so no number of further
+  rounds will move it.
+
+Careful with the conditioning column (`stellar_log_rstar`): its "prior"
+is the target's own +-n_sigma r_half window, not a prior the model
+trained under, so its `prior` number answers a different question from
+the other seven. The same table is printed to stdout, which is what
+survives in a SLURM log.
+
+Its last panel is the chi^2 of each round's predicted profiles against
+the binned data (LOS dispersion, LOS kurtosis, and their sum), which is
+the metric that catches what the widths miss: a round can leave every
+width untouched and still move the posterior's *centre* onto (or off)
+the data. The two 8p_ZhaoPlumCOM_v4 Draco runs both show widths flat to
+within 6% while chi^2 moves a lot, and they move differently - the DESI
+run improves monotonically (sigma 3.8 -> 1.6 per bin over two rounds),
+the PACE run improves at round 1 and regresses at round 2 (4.8 -> 4.0
+-> 4.7). Neither is visible in the widths or in the profile overlay.
+
+The line is the posterior-median profile's chi^2 (the headline, and
+what the printed table carries); the band is where individual draws
+land, which sits above the line rather than around it, since the median
+profile is smoother than any single draw. Read these as ranking rounds
+against each other, not as p-values: the errors are asymmetric and
+handled by the usual which-side heuristic, and `joint` sums two
+profiles binned from the same stars, so their measurement errors are
+correlated. The binned data itself is computed once per invocation and
+shared by every round, so the round-to-round comparison is exact even
+though `vdisp`'s own MCMC binning jitters a little between
+invocations.
+
+`run_pipeline.sh` calls it after each `train_round.py` (pass
+`--no-plots` to skip), and it is a diagnostic, never a gate: a failure is
+printed and the pipeline carries on, since the round's checkpoint is
+already registered by then.
+
+Rerunning is cheap, which is what makes calling it every round
+reasonable: a round whose `round_<r>.npz` still matches its settings and
+its checkpoint's size/mtime is read back instead of resampled, so round
+r+1 costs one round's work plus a redraw of the two comparison figures.
+`--overwrite` forces a recompute; deleting the `.npz` files does the
+same.
+
+It runs on **CPU** by default and that is the right choice - one
+observation's posterior is a small amount of work, and the Jeans
+profiles that follow are CPU-only regardless.
+
+```bash
+# Every trained round of a run, from its config or its directory:
+python posterior_by_round.py --config configs/8p_ZhaoPlumCOM_v4/my_run.py
+python posterior_by_round.py --run_dir models/8p_ZhaoPlumCOM_v4/my_run
+
+# Rounds 0..2 only (what --config.round=2 does mid-pipeline):
+python posterior_by_round.py --config configs/my_run.py --config.round=2
+
+# Shade every round's 16-84 band, not just the last one:
+python posterior_by_round.py --run_dir models/... --band_mode=all
+```
+
+`--band_mode` is the knob for the comparison figure's readability: with
+five or six rounds overlaid, shading them all averages out to one grey
+smear, so the default (`last`) shades only the final round and draws the
+rest as median lines, with weight and opacity ramping by round. Round 0
+is always grey and dashed - it is the shared pretrained base, not a
+fine-tune on this target. `first_last` (base vs final) is the direct
+answer to "what did the run buy?".
+
 ## Proposal sampling modes
 
 `config.proposal.sampling_mode` picks how the tau-truncated region is
@@ -155,39 +269,63 @@ Add these fields to your config explicitly if you want to override them
 from the command line — `ml_collections` configs are locked, so
 `--config.proposal.sampling_mode=auto` fails unless the field exists.
 
-## The prior is fixed, not configured
+## The prior comes from the model spec
 
-The prior box (8 physical params, `stellar_log_rstar` conditioning
-derived from the target's half-light radius) changes only with the
-training set, so it's plain constants in `tsnpe/prior.py`, not a config
-file. The bounds must match the `prior_min`/`prior_max` recorded in that
-set's `config.<n>.json`.
+Which box, which radius convention and which simulator physics belong
+together is described once, in the `dsph_sims` package (one `ModelSpec`
+per simulator family / prior variant;
+`python ../dsph_sims/scripts/simulate_batch.py --list` prints them). A run names its spec:
+
+```python
+config.model_spec = '8p_ZhaoPlumCOM_v4'   # the set round 0 was trained on
+```
+
+`register_run.py` turns `spec.tsnpe` into a `tsnpe.prior.Prior`, pins it
+to `round_0/prior_config.json`, and **refuses the checkpoint** if its
+training config disagrees: the dataset it names must have been simulated
+by that spec (read from the dataset's own `config.0.json`, or the spec's
+`datasets` list for old ones), its `labels` must be the prior's
+parameters in order, and its `cond_labels` must be the single
+conditioning column tsnpe supports. Every later round reads the pinned
+file back; `simulate_round.py` simulates with the spec's own
+`simulate`/`preprocess` — the functions that built the round-0 data —
+mapped from model units by `spec.tsnpe.model_to_sim`.
+
+| training set        | model_spec               | round-0 project      |
+|---------------------|--------------------------|----------------------|
+| `8p_ZhaoPlumCOM`, `_v2` | `8p_ZhaoPlumCOM` | `8p_ZhaoPlumCOM`   |
+| `8p_ZhaoPlumCOM_v3` | `8p_ZhaoPlumCOM_v3` | `8p_ZhaoPlumCOM_v3`  |
+| `8p_ZhaoPlumCOM_v4` | `8p_ZhaoPlumCOM_v4` | `8p_ZhaoPlumCOM_v4`  |
+
+The 9/10/11-parameter specs exist (simulation, npe) but have no tsnpe
+adapter yet — they condition on more than r_half — and `Prior.from_spec`
+says so. A config with no `model_spec` and no legacy `config.prior` block
+is priorA, so existing configs are untouched; a legacy
+`prior_config.json` (`radius_units`/`sim_variant` keys) is read the same
+way.
+
+`tsnpe/prior.py` itself imports nothing from `dsph_sims`: the pinned dict
+carries everything a `Prior` needs, so `plotting/`, the webapp's vendored
+copy and `npe_inference` rebuild one without agama, and still construct
+it with the old keywords (`Prior(radius_units='rstar', ...)`).
 
 ### Radius units
 
-The box always draws `dm_log_rdm` as `log10(r_dm / r_star)` — an offset
-from the conditioning value — because that is the only space in which the
-box is a box: `r_dm`'s kpc bounds slide with each row's own `r_star`
-draw. What differs between training sets is the units the *model*
-predicts, selected by `RADIUS_UNITS` in `tsnpe/prior.py`:
+The box always holds `dm_log_rdm` as `log10(r_dm / r_star)` — an offset
+from the conditioning value — because that is the only space in which
+the training prior is a box: `r_dm`'s kpc bounds slide with each row's
+own `r_star` draw. What differs between training sets is the units the
+*model* predicts, recorded in the prior's `kpc_offset_names`:
 
-- `'kpc'` (priorA / `8p_ZhaoPlumCOM`, the current default) — the model
-  predicts `log10(r_dm / kpc)`, so `to_kpc()` adds the conditioning value
-  on the way out and `to_rstar_units()` subtracts it on the way back.
-- `'rstar'` (priorB / `8p_ZhaoPlumCOM_v3`) — the model predicts
-  `log10(r_dm / r_star)`, the same units the box uses. Nothing converts:
-  `RSTAR_SCALED_PARAM_NAMES` is empty and both functions are the
-  identity.
+- priorA — the model predicts `log10(r_dm / kpc)`, so `box_to_model()`
+  adds the conditioning value on the way out and `model_to_box()`
+  subtracts it on the way back (`radius_units == 'kpc'`).
+- priorB, priorC — the model predicts `log10(r_dm / r_star)`, the same
+  units the box uses; the tuple is empty and both maps are the identity
+  (`radius_units == 'rstar'`).
 
-Switching to priorB is that one constant plus retraining round 0 on the
-matching dataset — and `tsnpe/sims.py`'s simulator moved to the relative
-convention, which has **not** been done yet.
-
-`df_log_ra` is in `r_star` units under both conventions (`sims.py`
+`df_log_ra` is in `r_star` units under both conventions (the simulator
 multiplies by `r_star` itself), so it never takes part in the conversion.
-
-`tsnpe/proposal.py` applies the conversion and builds model-ready
-features from the real observation.
 
 ## Debug mode
 
@@ -201,12 +339,14 @@ meaningless; it only exercises the pipeline's plumbing.
 
 ```bash
 # Step by step:
-python register_run.py    --config configs/my_run.py
-python simulate_round.py  --config configs/my_run.py --config.round=1
-python train_round.py     --config configs/my_run.py --config.round=1
+python register_run.py        --config configs/my_run.py
+python simulate_round.py      --config configs/my_run.py --config.round=1
+python train_round.py         --config configs/my_run.py --config.round=1
+python posterior_by_round.py  --config configs/my_run.py --config.round=1
 
-# Or all at once, rounds 1..5:
+# Or all at once, rounds 1..5 (plots after each round):
 ./run_pipeline.sh --config configs/my_run.py --rounds 5
+./run_pipeline.sh --config configs/my_run.py --rounds 5 --no-plots
 
 # Any ml_collections override is passed through, e.g. more sims per round:
 ./run_pipeline.sh --config configs/my_run.py --rounds 5 \
@@ -235,4 +375,8 @@ To resume a job that hit its time limit mid-round: resubmit the same
 command (same `--rounds`, `--start-round` at or before the last completed
 round). Every step in `run_pipeline.sh` is state.json-gated and no-ops if
 already done, so this is always safe regardless of exactly where the
-previous attempt stopped.
+previous attempt stopped — **provided `config.overwrite` is False**.
+`register_run.py` runs on every submission and honours that flag by
+deleting the whole `run_dir` first, finished rounds included. Set it to
+True only for a deliberate from-scratch restart, never in a config you
+will resubmit.

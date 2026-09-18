@@ -46,7 +46,8 @@ from jgnn.callbacks.visualization import NPEVisualizationCallback
 torch.set_num_threads(len(os.sched_getaffinity(0)))
 
 
-def prepare_data(config, data_path, norm_dict, pre_transforms_config):
+def prepare_data(config, data_path, norm_dict, pre_transforms_config,
+                 run_prior):
     """Build train/val dataloaders from one round's simulated Cartesian dataset.
 
     Args:
@@ -55,6 +56,8 @@ def prepare_data(config, data_path, norm_dict, pre_transforms_config):
         norm_dict: Fixed normalization dict (reused, never recomputed).
         pre_transforms_config: The round-0 model's pre_transforms config
             (state.pre_transforms_config_path()).
+        run_prior: The run's pinned `Prior`; its `param_names` are the
+            labels and its `cond_name` the conditioning column.
 
     Returns:
         Tuple of (train_loader, val_loader).
@@ -63,8 +66,8 @@ def prepare_data(config, data_path, norm_dict, pre_transforms_config):
     seed_data = config.seed + config.round + SEED_OFFSET
 
     train_loader, val_loader, _ = datasets.cartesian.prepare_dataloaders(
-        node_feats, graph_feats, prior.PARAM_NAMES,
-        cond_labels=[prior.CONDITIONING_NAME],
+        node_feats, graph_feats, list(run_prior.param_names),
+        cond_labels=[run_prior.cond_name],
         train_batch_size=config.training.train_batch_size,
         eval_batch_size=config.training.eval_batch_size,
         train_frac=config.training.train_frac,
@@ -154,10 +157,13 @@ def main(config):
     norm_dict = json.loads(state.norm_dict_path().read_text())
     model_config = ConfigDict(json.loads(state.model_config_path().read_text()))
     pre_transforms_config = json.loads(state.pre_transforms_config_path().read_text())
+    run_prior = prior.Prior.from_dict(
+        json.loads(state.prior_config_path().read_text()))
 
     print(f'=== Round {r}: train ===')
     print(f'[Data] Loading {data_path}')
-    train_loader, val_loader = prepare_data(config, data_path, norm_dict, pre_transforms_config)
+    train_loader, val_loader = prepare_data(
+        config, data_path, norm_dict, pre_transforms_config, run_prior)
     print(f'[Data] Train batches: {len(train_loader)}, Val batches: {len(val_loader)}')
 
     print('[Transforms] Building pre-transforms...')

@@ -16,15 +16,18 @@ from ml_collections import ConfigDict
 from jgnn.models import NPE, GNNEmbedding, TransformerEmbedding
 
 
-def debug_model_config() -> ml_collections.ConfigDict:
+def debug_model_config(n_params: int = 7) -> ml_collections.ConfigDict:
     """Small fixed architecture for register_run.py's `random_init` debug path.
 
     Mirrors npe/configs/chebconv_8params.py, shrunk, plus a conditional_mlp
     for tsnpe's stellar_log_r_star conditioning.
+
+    Args:
+        n_params: Flow output size, len(run_prior.param_names).
     """
     model = ConfigDict()
     model.input_size = 3   # log10(R_proj), vlos, vlos_err
-    model.output_size = 7  # len(tsnpe.prior.PARAM_NAMES)
+    model.output_size = n_params
 
     model.embedding = ConfigDict()
     model.embedding.type = 'gnn'

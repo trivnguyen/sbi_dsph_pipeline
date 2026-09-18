@@ -44,6 +44,8 @@ from tsnpe.model_io import build_npe, debug_model_config, debug_pre_transforms_c
 
 from jgnn import utils
 
+import dsph_sims
+
 
 def _to_plain_dict(x) -> dict:
     return x.to_dict() if hasattr(x, 'to_dict') else dict(x)
@@ -125,7 +127,9 @@ def _resolve_checkpoint(pretrained_config):
     embedded hyperparameters either way, never wandb.
 
     Returns:
-        (checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance)
+        (checkpoint_path, model_config, pre_transforms_config, norm_dict,
+        provenance, full_config) - full_config is the training config the
+        checkpoint was made with, for cross-checks against the run's prior.
     """
     if pretrained_config.get('local_checkpoint_dir'):
         checkpoint_path = utils.fetch_local_checkpoint(
@@ -148,7 +152,7 @@ def _resolve_checkpoint(pretrained_config):
             'source': 'local_offline',
             'local_checkpoint_dir': pretrained_config.local_checkpoint_dir,
         }
-        return checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance
+        return checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance, full_config
 
     checkpoint_path, full_config = utils.fetch_wandb_checkpoint(
         run_path=pretrained_config.wandb_run_path,
@@ -156,12 +160,61 @@ def _resolve_checkpoint(pretrained_config):
     model_config, pre_transforms_config = _resolve_configs(full_config, pretrained_config)
     norm_dict = _norm_dict_from_checkpoint(checkpoint_path)
     provenance = {'source': 'wandb', 'wandb_run_path': pretrained_config.wandb_run_path}
-    return checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance
+    return checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance, full_config
+
+
+def _resolve_prior(config) -> prior.Prior:
+    """The run's prior: from `config.model_spec` (dsph_sims), or the legacy
+    `config.prior` block, or priorA when neither is given."""
+    if config.get('model_spec'):
+        if config.get('prior'):
+            raise ValueError(
+                'give config.model_spec or the legacy config.prior block, '
+                'not both')
+        return prior.Prior.from_spec(dsph_sims.get_spec(config.model_spec))
+    return prior.Prior.from_dict(dict(config.get('prior', {})))
+
+
+def _check_prior_matches_checkpoint(run_prior, full_config, norm_dict):
+    """Refuse a round-0 checkpoint trained on a different training set.
+
+    The checkpoint's training config names its dataset (and, for models
+    trained after specs existed, its spec); the dataset's own config.0.json
+    names the spec that simulated it. All of it has to agree with the
+    prior this run will draw its proposals from, and the labels have to
+    be the parameters in the same order.
+
+    Raises:
+        ValueError: On any mismatch.
+    """
+    spec = dsph_sims.get_spec(run_prior.model_spec)
+    ckpt_spec = full_config.get('model_spec') or dsph_sims.dataset_model_spec(
+        full_config.get('data_root'), full_config.data_name)
+    if ckpt_spec != run_prior.model_spec:
+        raise ValueError(
+            f'checkpoint was trained on {full_config.data_name!r} '
+            f'({ckpt_spec}), but the run prior is {run_prior.model_spec}')
+    labels = list(full_config.labels)
+    if labels != list(run_prior.param_names):
+        raise ValueError(
+            f'checkpoint labels {labels} != prior param_names '
+            f'{list(run_prior.param_names)}')
+    cond = list(full_config.get('cond_labels') or [])
+    if len(cond) != 1 or cond[0] not in spec.tsnpe.cond_columns:
+        raise ValueError(
+            f'checkpoint cond_labels {cond} is not the single conditioning '
+            f'column tsnpe supports for {spec.name} ({spec.tsnpe.cond_columns})')
+    if len(norm_dict['theta_loc']) != len(run_prior.param_names):
+        raise ValueError(
+            f"norm_dict has {len(norm_dict['theta_loc'])} theta entries for "
+            f'{len(run_prior.param_names)} parameters')
+    print(f'[Prior] checkpoint trained on {full_config.data_name} == '
+          f'{ckpt_spec}; labels and conditioning match')
 
 
 def register_pretrained(config, state: RunState) -> None:
     """Register config.pretrained's checkpoint as round 0 in config.run_dir."""
-    run_prior = prior.Prior.from_dict(dict(config.get('prior', {})))
+    run_prior = _resolve_prior(config)
     if state.base is not None:
         print(f"[Base] Already registered in {state.run_dir}.")
         return
@@ -172,7 +225,7 @@ def register_pretrained(config, state: RunState) -> None:
 
     if config.pretrained.get('random_init', False):
         print("[Base] random_init=True: using a freshly-initialized debug model.")
-        model_config = debug_model_config()
+        model_config = debug_model_config(len(run_prior.param_names))
         pre_transforms_config = debug_pre_transforms_config()
         norm_dict = run_prior.default_norm_dict()
         model = build_npe(model_config, pre_transforms=None, norm_dict=norm_dict)
@@ -180,8 +233,9 @@ def register_pretrained(config, state: RunState) -> None:
         provenance = {'source': 'random_init'}
     else:
         print("[Base] Resolving pretrained checkpoint...")
-        checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance = \
-            _resolve_checkpoint(config.pretrained)
+        (checkpoint_path, model_config, pre_transforms_config, norm_dict,
+         provenance, full_config) = _resolve_checkpoint(config.pretrained)
+        _check_prior_matches_checkpoint(run_prior, full_config, norm_dict)
         shutil.copy2(checkpoint_path, ckpt_dst)
 
     norm_dict_dst = round0_dir / 'norm_dict.json'

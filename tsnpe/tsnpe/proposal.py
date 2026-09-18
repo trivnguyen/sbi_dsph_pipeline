@@ -17,7 +17,6 @@ from tqdm import tqdm
 
 from jgnn.transforms import build_transformation
 
-from . import prior as prior_lib
 from .target import TargetData
 
 _LOG_EPS = 1e-6
@@ -278,15 +277,15 @@ def _sample_posterior_mc(
 
 def _normalize(prior, theta_box: np.ndarray, norm_dict: dict):
     """Map box-space samples to the model's (theta_norm, cond_norm)."""
-    theta_phys = prior.to_kpc(theta_box)
-    n_base = len(prior_lib.PARAM_NAMES)
+    theta_phys = prior.box_to_model(theta_box)
+    n_base = prior.cond_index
     theta_loc = np.asarray(norm_dict['theta_loc'])
     theta_scale = np.asarray(norm_dict['theta_scale'])
     theta_norm = (theta_phys[:, :n_base] - theta_loc) / theta_scale
 
     cond_loc = np.asarray(norm_dict['cond_loc'])
     cond_scale = np.asarray(norm_dict['cond_scale'])
-    cond_phys = theta_phys[:, prior_lib.CONDITIONING_INDEX].reshape(-1, 1)
+    cond_phys = theta_phys[:, prior.cond_index].reshape(-1, 1)
     cond_norm = (cond_phys - cond_loc) / cond_scale
     return theta_norm, cond_norm
 
@@ -471,14 +470,15 @@ def estimate_tau(
     call for diagnostics.
 
     Args:
-        return_posterior: If True, also return the posterior samples
-            already drawn for calibration (all of them, not just the
-            in-box ones tau itself is computed from).
+        return_posterior: If True, also return the in-box posterior
+            samples already drawn for calibration - exactly the rows tau
+            is computed from.
 
     Returns:
         tau, or (tau, posterior_phys) if return_posterior - posterior_phys
-        is a (n_post_samples, 8) ndarray, physical units, columns matching
-        tsnpe.prior.ALL_PARAM_NAMES.
+        is an (n_in_box, 8) ndarray, physical units, columns matching
+        tsnpe.prior.ALL_PARAM_NAMES. Already physical: sample_posterior
+        did the conversion, so it must not be converted again here.
 
     Raises:
         RuntimeError: If every posterior sample falls outside the prior box.
@@ -488,14 +488,13 @@ def estimate_tau(
         prior_n_sigma=prior_n_sigma,
         n_samples=n_post_samples, n_mc_conditioning=n_mc_conditioning,
         return_log_prob=True, batch_size=batch_size)
-    post_all, cond_all = post_phys_all[:, :-1], post_phys_all[:, -1]
 
     tau = float(np.quantile(log_q, epsilon))
     print(f'  tau (eps={epsilon:.0e}): {tau:.4f} '
           f'[log-prob: {log_q.min():.2f} .. {log_q.max():.2f}]')
 
     if return_posterior:
-        return tau, _posterior_to_phys(post_all, cond_all, norm_dict)
+        return tau, post_phys_all
     return tau
 
 
@@ -545,7 +544,7 @@ def _sample_proposal_rejection(
                 model, prior, obs_graph, norm_dict, cands_box, batch_size=batch_size)
         mask = lq >= tau
         if mask.any():
-            accepted.append(prior.to_kpc(cands_box[mask]))
+            accepted.append(prior.box_to_model(cands_box[mask]))
             n_accepted += int(mask.sum())
         n_drawn += draw_batch
         pbar.update(int(mask.sum()))

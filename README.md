@@ -41,9 +41,10 @@ are the exception and stay tracked as documented starting points.
 ```bash
 # 1. Simulate npe's training data (wide prior, no target observation
 #    involved yet)
+python dsph_sims/scripts/simulate_batch.py --model 8p_ZhaoPlumCOM \
+    --n-sims 100000 --output-dir /scratch/.../datasets/8p_ZhaoPlumCOM
+#    (--list shows the specs)
 cd npe
-python simulate_8params_process_priorA.py --n-sims 100000 \
-    --output-dir /scratch/$USER/datasets/8p_ZhaoPlumCOM
 
 # 2. Train the baseline NPE - locally, or via slurm/submit.sh on a cluster
 python train_npe.py --config configs/my_run.py

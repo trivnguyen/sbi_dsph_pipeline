@@ -22,6 +22,7 @@
 #   --config       PATH   ml_collections config file                 [required]
 #   --rounds       N      Last round to run, inclusive                [default: 1]
 #   --start-round  R      First round to run                          [default: 1]
+#   --no-plots            Skip the per-round diagnostic plots
 #   (any other --config.<field>=<value> flags are forwarded as-is)
 
 set -euo pipefail
@@ -31,6 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG=""
 ROUNDS=1
 START_ROUND=1
+PLOTS=1
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --config)       CONFIG="$2";       shift 2 ;;
         --rounds)       ROUNDS="$2";       shift 2 ;;
         --start-round)  START_ROUND="$2";  shift 2 ;;
+        --no-plots)     PLOTS=0;           shift   ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -70,6 +73,18 @@ for r in $(seq "$START_ROUND" "$ROUNDS"); do
     echo "[train] round $r"
     python3 "$SCRIPT_DIR/train_round.py" \
         --config "$CONFIG" --config.round="$r" "${EXTRA_ARGS[@]}"
+
+    # Diagnostics only: they must never fail the round that produced
+    # them (the checkpoint is already registered in state.json by this
+    # point), hence the `|| echo`. Earlier rounds come from their cache,
+    # so this is only round $r's own work plus a redraw of the
+    # comparison figures.
+    if [[ "$PLOTS" -eq 1 ]]; then
+        echo "[plot] rounds 0..$r"
+        python3 "$SCRIPT_DIR/posterior_by_round.py" \
+            --config "$CONFIG" --config.round="$r" "${EXTRA_ARGS[@]}" \
+            || echo "[plot] round $r diagnostics failed; continuing."
+    fi
 
     echo "Round $r complete."
 done

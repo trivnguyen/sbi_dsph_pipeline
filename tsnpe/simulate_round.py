@@ -40,8 +40,8 @@ from tsnpe.model_io import build_npe
 from tsnpe.sims import run_simulation_batch, write_graph_dataset
 
 
-def resolve_truths(target_config):
-    """Order `config.target.true_params` into `prior.ALL_PARAM_NAMES` order.
+def resolve_truths(target_config, run_prior):
+    """Order `config.target.true_params` into `run_prior.all_names` order.
 
     Keyed by name rather than taken positionally on purpose: a truth list
     silently written in the wrong order would mark the wrong crosshairs on
@@ -50,31 +50,32 @@ def resolve_truths(target_config):
     Args:
         target_config: `config.target`. `true_params` is optional -- a real
             observation has no truth, and None means no crosshairs.
+        run_prior: The run's `Prior`, whose `all_names` fixes the order.
 
     Returns:
-        A length-8 list in `prior.ALL_PARAM_NAMES` order, or None.
+        A length-8 list in `run_prior.all_names` order, or None.
 
     Raises:
         ValueError: If `true_params` names a parameter that is not in
-            `prior.ALL_PARAM_NAMES`, or omits one that is.
+            `run_prior.all_names`, or omits one that is.
     """
     true_params = target_config.get('true_params')
     if not true_params:
         return None
 
     true_params = dict(true_params)
-    unknown = sorted(set(true_params) - set(prior.ALL_PARAM_NAMES))
+    unknown = sorted(set(true_params) - set(run_prior.all_names))
     if unknown:
         raise ValueError(
             f'config.target.true_params has unknown parameter(s) {unknown}; '
-            f'expected names from {prior.ALL_PARAM_NAMES}')
-    missing = [n for n in prior.ALL_PARAM_NAMES if n not in true_params]
+            f'expected names from {run_prior.all_names}')
+    missing = [n for n in run_prior.all_names if n not in true_params]
     if missing:
         raise ValueError(
             f'config.target.true_params is missing {missing}; give every '
             'parameter or leave the whole field unset')
 
-    return [float(true_params[name]) for name in prior.ALL_PARAM_NAMES]
+    return [float(true_params[name]) for name in run_prior.all_names]
 
 
 def plot_corner(samples, labels, save_path, title, color='steelblue',
@@ -233,6 +234,16 @@ def main(config):
             return_posterior=True, **config.proposal)
         print(f'  proposal_phys : {proposal_phys.shape}')
         print(f'  diagnostics   : {diagnostics}')
+        # Both come back in physical units and in box space by
+        # construction; a row outside the box means a units/conversion
+        # bug upstream, not an unlucky draw - stop before simulating it.
+        for name, arr in (('proposal', proposal_phys),
+                          ('posterior', posterior_phys)):
+            n_out = int((~run_prior.in_prior_box(arr, target)).sum())
+            if n_out:
+                raise RuntimeError(
+                    f'{n_out}/{len(arr)} {name} rows lie outside the '
+                    'pinned prior box; refusing to simulate.')
 
         # Settings last: it is what load_cached_proposal keys on, so it
         # must not appear before the arrays it describes are on disk.
@@ -243,16 +254,16 @@ def main(config):
         with open(round_dir / 'proposal_settings.json', 'w') as f:
             json.dump(settings, f, indent=2)
 
-    truths = resolve_truths(config.target)
+    truths = resolve_truths(config.target, run_prior)
     if truths is not None:
         print(f'[Plot] Marking truth: '
-              f'{dict(zip(prior.ALL_PARAM_NAMES, truths))}')
+              f'{dict(zip(run_prior.all_names, truths))}')
 
     plot_corner(
-        proposal_phys, prior.ALL_PARAM_NAMES, round_dir / 'proposal_corner.png',
+        proposal_phys, run_prior.all_names, round_dir / 'proposal_corner.png',
         'Proposal samples', truths=truths)
     plot_corner(
-        posterior_phys, prior.ALL_PARAM_NAMES, round_dir / 'posterior_corner.png',
+        posterior_phys, run_prior.all_names, round_dir / 'posterior_corner.png',
         'Posterior samples', color='darkorange', truths=truths)
 
     print('[Simulate] Running Agama simulation batch...')
@@ -262,11 +273,12 @@ def main(config):
     theta, posvel_list = run_simulation_batch(
         proposal_phys, n_stars, n_jobs=sim_cfg.n_jobs,
         use_multiprocessing=sim_cfg.use_multiprocessing,
-        sample_threads=sim_cfg.sample_threads)
+        sample_threads=sim_cfg.sample_threads,
+        spec_name=run_prior.model_spec)
 
     data_path = round_dir / 'data.hdf5'
     write_graph_dataset(
-        str(data_path), theta, posvel_list, prior.ALL_PARAM_NAMES,
+        str(data_path), theta, posvel_list, run_prior.all_names,
         headers={
             'name': f'{target.key}_tsnpe_round{r}', 'round': r,
             'n_sims_requested': config.proposal.n_sims,

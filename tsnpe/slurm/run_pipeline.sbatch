@@ -82,6 +82,9 @@ export NUMEXPR_NUM_THREADS=1
 export XDG_CACHE_HOME="/scratch/tvnguyen/cache"
 export MPLCONFIGDIR="/scratch/tvnguyen/cache/matplotlib"
 export WANDB_CONFIG_DIR="/scratch/tvnguyen/cache/wandb_config"
+# wandb-core cold start on the slow compute-node NFS exceeds the 30 s
+# default and kills the job before round 1 (see npe/slurm/train_npe.sbatch).
+export WANDB_X_SERVICE_WAIT=300
 export TORCH_HOME="/scratch/tvnguyen/cache/torch"
 mkdir -p "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$WANDB_CONFIG_DIR" "$TORCH_HOME"
 
