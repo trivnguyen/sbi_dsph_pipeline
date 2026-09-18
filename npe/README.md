@@ -7,30 +7,18 @@ it for `tsnpe/` to fine-tune against a real target.
 ## Layout
 
 ```
-simulate_8params_process_priorA.py
-                              simulate training data (ProcessPoolExecutor;
-                               each worker has its own isolated agama
-                               state, so no locking needed - prefer this
-                               one). priorA: r_dm in kpc, r_star in units
-                               of r_dm, r_a in units of r_star
-simulate_8params_process_priorB.py
-                              same, with r_dm and r_a both in units of
-                               r_star and r_star in kpc - the
-                               parameterization tsnpe's RADIUS_UNITS
-                               ='rstar' expects
-simulate_8params_thread.py    same simulation, ThreadPoolExecutor version
-                               (needs a lock around agama's RNG-touching
-                               .sample() call - kept for comparison)
-simulate_10params_process_flathalo.py
-                              priorA + DM halo axis ratio q and viewing
-                               inclination i (Multipole, lmax=24)
-simulate_9params_process_plumgamma.py
-                              priorA + free tracer inner slope
-                               gamma_star, with beta0 <= 0
-simulate_11params_process_abg.py
-                              priorA with the Plummer tracer replaced by
-                               a full alpha-beta-gamma profile
-train_npe.py                  train the model
+../dsph_sims/                 simulators, one importable package (see its
+                               README): models/<spec>.py per family / prior
+                               variant, a generic batch runner, the CLI
+                               scripts/simulate_batch.py, and the original
+                               scripts frozen under legacy/
+    scripts/simulate_batch.py --model <spec> ...   new runs
+    scripts/simulate_batch.py --list               specs and their datasets
+train_npe.py                  train the model; set config.model_spec to
+                               the spec that simulated config.data_name and
+                               it refuses a mismatch (dataset config.0.json
+                               is the authority) or labels that are not
+                               the spec's columns
 eval_utils.py                 load a trained run, sample its posterior
                                over the held-out shard, and make the
                                corner / pred-v-true / calibration plots
@@ -107,9 +95,9 @@ DM/DF labels as the 8-parameter baseline so the posteriors are comparable.
 
 | simulator | dataset | config | new parameters |
 |---|---|---|---|
-| `simulate_10params_process_flathalo.py` | `10p_flathalo_qi` | `configs/chebconv_10params_flathalo.py` | `dm_q`, `cos_inc` (labels) |
-| `simulate_9params_process_plumgamma.py` | `9p_plumgamma` | `configs/chebconv_9params_plumgamma.py` | `stellar_gamma` (conditioning) |
-| `simulate_11params_process_abg.py` | `11p_abg` | `configs/chebconv_11params_abg.py` | `stellar_{alpha,beta,gamma}` (conditioning) |
+| `simulate_10params_process_flathalo.py` | `10p_FlatZhaoPlumCOM` | `configs/chebconv_10params_flathalo.py` | `dm_q`, `cos_inc` (labels) |
+| `simulate_9params_process_plumgamma.py` | `9p_ZhaoPlumGammaCOM` | `configs/chebconv_9params_plumgamma.py` | `stellar_gamma` (conditioning) |
+| `simulate_11params_process_abg.py` | `11p_ZhaoABGCOM` | `configs/chebconv_11params_abg.py` | `stellar_{alpha,beta,gamma}` (conditioning) |
 
 `q` and `cos_inc` are inference targets because neither is observable. The
 light-profile shape parameters are conditioning inputs instead, because
@@ -121,7 +109,7 @@ it is a one-line change in the config.
 The two tracer-shape runs condition on `stellar_log_rhalf_kpc` rather than
 `stellar_log_rstar_kpc`. For Plummer the two coincide, but once the shape is
 free the scale radius stops being an observable: `R_h/r_star` spans about
-0.8-6 in `9p_plumgamma` and more than two decades in `11p_abg`. The
+0.8-6 in `9p_ZhaoPlumGammaCOM` and more than two decades in `11p_ZhaoABGCOM`. The
 simulators compute `R_h` per galaxy from the analytic projected profile.
 
 Simulation runs on the CPU cluster, training on the GPU cluster — they are
@@ -130,8 +118,9 @@ separate schedulers, so a SLURM dependency cannot chain them:
 ```bash
 ssh tri-login01
 cd .../npe/slurm
-sbatch --job-name=sim_11p_abg simulate.sbatch \
-    simulate_11params_process_abg.py /scratch/$USER/datasets/11p_abg 240000 \
+sbatch --job-name=sim_11p_ZhaoABGCOM simulate.sbatch \
+    ../dsph_sims/scripts/simulate_batch.py /scratch/$USER/datasets/11p_ZhaoABGCOM 240000 \
+    --model 11p_ZhaoABGCOM \
     --n-stars 100 --galaxies-per-file 25000 --seed 810233
 ```
 
@@ -148,7 +137,7 @@ defaults to that shard.
 
 ```python
 import eval_utils as ev
-model, config, norm_dict = ev.load_npe(ev.find_run_dir('11p_abg'))
+model, config, norm_dict = ev.load_npe(ev.find_run_dir('11p_abg')  # wandb project / run dir, not the dataset)
 loader, shard = ev.load_test_set(config, norm_dict, max_graphs=2000)
 samples, truth = ev.sample_posterior(model, loader, num_samples=1000)
 ```

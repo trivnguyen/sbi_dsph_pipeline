@@ -54,6 +54,7 @@ export XDG_CACHE_HOME="/scratch/tvnguyen/cache"
 export MPLCONFIGDIR="/scratch/tvnguyen/cache/matplotlib"
 export WANDB_CONFIG_DIR="/scratch/tvnguyen/cache/wandb_config"
 export TORCH_HOME="/scratch/tvnguyen/cache/torch"
+export WANDB_X_SERVICE_WAIT=300
 mkdir -p "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$WANDB_CONFIG_DIR" "$TORCH_HOME"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$MANIFEST"; }

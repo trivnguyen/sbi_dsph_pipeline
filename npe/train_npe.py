@@ -19,6 +19,7 @@ import torch
 from absl import flags
 from ml_collections import config_flags
 
+import dsph_sims
 from jgnn import datasets, training
 from jgnn.models import NPE, GNNEmbedding
 from jgnn.transforms import build_transformation
@@ -221,6 +222,29 @@ def create_callbacks(config: ml_collections.ConfigDict) -> list:
     return callbacks
 
 
+def check_model_spec(config: ml_collections.ConfigDict) -> None:
+    """Refuse a `model_spec` that did not simulate `data_name`, or labels
+    that are not its columns.
+
+    Raises:
+        ValueError: On either mismatch.
+    """
+    spec = dsph_sims.get_spec(config.model_spec)
+    data_spec = dsph_sims.dataset_model_spec(config.data_root, config.data_name)
+    if data_spec != spec.name:
+        raise ValueError(
+            f'config.model_spec={spec.name!r} but {config.data_name!r} was '
+            f'simulated by {data_spec!r}')
+    wanted = set(config.labels) | set(config.get('cond_labels') or ())
+    unknown = sorted(wanted - set(spec.column_names))
+    if unknown:
+        raise ValueError(
+            f'labels/cond_labels {unknown} are not columns of {spec.name}: '
+            f'{list(spec.column_names)}')
+    print(f'[Spec] {spec.name} simulated {config.data_name}; labels and '
+          'cond_labels are its columns')
+
+
 def main(config: ml_collections.ConfigDict, config_path: str = None):
     """Train the NPE model with wandb logging.
 
@@ -252,6 +276,10 @@ def main(config: ml_collections.ConfigDict, config_path: str = None):
         norm_dict = resume_checkpoint['hyper_parameters']['norm_dict']
         print("[Checkpoint] Reusing norm_dict from resumed checkpoint")
 
+    if config.get('model_spec'):
+        # Reason: a config naming the wrong spec is exactly the silent
+        # mismatch tsnpe later guards against, so refuse it up front.
+        check_model_spec(config)
     print("[Data] Loading datasets...")
     train_loader, val_loader, norm_dict = prepare_data(config, norm_dict=norm_dict)
     print(f"[Data] Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
