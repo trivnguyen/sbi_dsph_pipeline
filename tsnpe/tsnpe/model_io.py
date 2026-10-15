@@ -13,7 +13,9 @@ brand-new embedding network from scratch after round 0.
 import ml_collections
 from ml_collections import ConfigDict
 
-from jgnn.models import NPE, GNNEmbedding, TransformerEmbedding
+from jgnn.models import (NPE, GNNEmbedding, GNNSummaryEmbedding,
+                         SummaryEmbedding, SetTransformerEmbedding,
+                         TransformerEmbedding, DeepSetsEmbedding)
 
 
 def debug_model_config(n_params: int = 7) -> ml_collections.ConfigDict:
@@ -116,6 +118,55 @@ def build_embedding(model_config: ml_collections.ConfigDict):
             loss_args=embed_cfg.get('loss_args', None),
             conditional_mlp_args=embed_cfg.get('conditional_mlp', None),
             # NPE handles optimizer, scheduler, and pre_transforms
+            optimizer_args=None,
+            scheduler_args=None,
+            pre_transforms=None,
+        )
+    elif model_type == 'set_transformer':
+        return SetTransformerEmbedding(
+            set_transformer_args=embed_cfg.set_transformer,
+            input_size=model_config.input_size,
+            mlp_args=embed_cfg.mlp,
+            loss_type=embed_cfg.get('loss_type', 'mse'),
+            loss_args=embed_cfg.get('loss_args', None),
+            conditional_mlp_args=embed_cfg.get('conditional_mlp', None),
+            optimizer_args=None,
+            scheduler_args=None,
+            pre_transforms=None,
+        )
+    elif model_type == 'deepsets':
+        return DeepSetsEmbedding(
+            deepsets_args=embed_cfg.deepsets,
+            input_size=model_config.input_size,
+            mlp_args=embed_cfg.mlp,
+            loss_type=embed_cfg.get('loss_type', 'mse'),
+            loss_args=embed_cfg.get('loss_args', None),
+            conditional_mlp_args=embed_cfg.get('conditional_mlp', None),
+            optimizer_args=None,
+            scheduler_args=None,
+            pre_transforms=None,
+        )
+    elif model_type == 'summary':
+        return SummaryEmbedding(
+            summary_args=embed_cfg.summary,
+            input_size=model_config.input_size,
+            mlp_args=embed_cfg.mlp,
+            loss_type=embed_cfg.get('loss_type', 'mse'),
+            loss_args=embed_cfg.get('loss_args', None),
+            conditional_mlp_args=embed_cfg.get('conditional_mlp', None),
+            optimizer_args=None,
+            scheduler_args=None,
+            pre_transforms=None,
+        )
+    elif model_type == 'gnn_summary':
+        return GNNSummaryEmbedding(
+            summary_args=embed_cfg.summary,
+            input_size=model_config.input_size,
+            gnn_args=embed_cfg.gnn,
+            mlp_args=embed_cfg.mlp,
+            loss_type=embed_cfg.get('loss_type', 'mse'),
+            loss_args=embed_cfg.get('loss_args', None),
+            conditional_mlp_args=embed_cfg.get('conditional_mlp', None),
             optimizer_args=None,
             scheduler_args=None,
             pre_transforms=None,

@@ -101,9 +101,9 @@ def _uniform_conditioning_draws(
 
 
 def _supports_fast_embedding(model) -> bool:
-    """Whether model matches GNNEmbedding.forward's architecture:
-    embedding = mlp(gnn(x, edge_index, batch)) + conditional_mlp(cond) (see
-    jgnn.models.lightning.gnn_embedding.GNNEmbedding.forward). This is the
+    """Whether model's embedding is `embed_data(batch) + conditional_mlp(cond)`
+    (every jgnn embedding class that defines `embed_data`; see
+    jgnn.models.lightning.gnn_embedding.GNNEmbedding). This is the
     assumption the *_fast functions below rely on to skip replicating the
     observation graph per conditioning draw/candidate - the graph term is
     independent of cond, so it only needs computing once. False for any
@@ -113,8 +113,7 @@ def _supports_fast_embedding(model) -> bool:
     embedding_nn = getattr(model, 'embedding_nn', None)
     return (
         embedding_nn is not None
-        and hasattr(embedding_nn, 'gnn')
-        and hasattr(embedding_nn, 'mlp')
+        and hasattr(embedding_nn, 'embed_data')
         and getattr(embedding_nn, 'conditional_mlp', None) is not None
     )
 
@@ -131,12 +130,11 @@ def _embed_observation(model, obs_graph) -> torch.Tensor:
     embedding_nn = model.embedding_nn
     bd = embedding_nn._prepare_batch(obs_batch)
     with torch.no_grad():
-        return embedding_nn.mlp(
-            embedding_nn.gnn(
-                bd['x'], bd['edge_index'], batch=bd['batch'],
-                edge_attr=bd['edge_attr'], edge_weight=bd['edge_weight'],
-            )
-        )
+        # Reason: each embedding class owns the data half of its forward
+        # (GNN, GNN + summary branch, summary only, set transformer);
+        # calling mlp(gnn(...)) here dropped the summary branch and
+        # failed with a shape mismatch for gnn_summary models.
+        return embedding_nn.embed_data(bd)
 
 
 def _sample_posterior_mc_fast(
@@ -159,7 +157,14 @@ def _sample_posterior_mc_fast(
 
     cond_loc = np.asarray(norm_dict['cond_loc'])
     cond_scale = np.asarray(norm_dict['cond_scale'])
-    cond_norm = (np.asarray(cond_mc).reshape(-1, 1) - cond_loc) / cond_scale
+    # Reason: reshape by row, not to a single column. A model with extra
+    # fixed conditioning axes (see Prior.expand_conditioning) arrives
+    # here as (N, C); the old `.reshape(-1, 1)` would flatten that to
+    # (N*C, 1) and then broadcast it against the C-long cond_loc,
+    # silently normalizing every value by the wrong axis's statistics.
+    # For the scalar case this is exactly the old expression.
+    cond_norm = (np.asarray(cond_mc).reshape(len(cond_mc), -1)
+                 - cond_loc) / cond_scale
 
     with torch.no_grad():
         cond_tensor = torch.tensor(
@@ -174,7 +179,7 @@ def _sample_posterior_mc_fast(
             post = dist.rsample((n_per_draw,))
 
     post_all = post.reshape(-1, post.shape[-1]).cpu().numpy()
-    cond_all = np.repeat(cond_mc, n_per_draw)
+    cond_all = np.repeat(cond_mc, n_per_draw, axis=0)
     if return_log_prob:
         log_q_all = logq.reshape(-1).cpu().numpy()
         return post_all, cond_all, log_q_all
@@ -226,7 +231,9 @@ def _sample_posterior_mc_safe(
 
     cond_loc = np.asarray(norm_dict['cond_loc'])
     cond_scale = np.asarray(norm_dict['cond_scale'])
-    cond_norm = (np.asarray(cond_mc).reshape(-1, 1) - cond_loc) / cond_scale
+    # See the same line in _sample_posterior_mc_fast.
+    cond_norm = (np.asarray(cond_mc).reshape(len(cond_mc), -1)
+                 - cond_loc) / cond_scale
 
     n = len(cond_mc)
     post_chunks, log_q_chunks = [], []
@@ -250,7 +257,7 @@ def _sample_posterior_mc_safe(
             log_q_chunks.append(logq.reshape(-1).cpu().numpy())
 
     post_all = np.concatenate(post_chunks, axis=0)
-    cond_all = np.repeat(cond_mc, n_per_draw)
+    cond_all = np.repeat(cond_mc, n_per_draw, axis=0)
     if return_log_prob:
         log_q_all = np.concatenate(log_q_chunks)
         return post_all, cond_all, log_q_all
@@ -374,6 +381,7 @@ def sample_posterior(
     return_log_prob: bool = False,
     batch_size: int = 64,
     prior_n_sigma: float = 5.0,
+    cond_value: float = None,
 ) -> np.ndarray:
     """Draw posterior samples at the real target's observation, for diagnostics.
 
@@ -394,8 +402,12 @@ def sample_posterior(
             ever an approximation of the true conditioning-uncertainty
             marginalization, so may be set arbitrarily high; batch_size
             keeps memory bounded regardless (see _sample_posterior_mc).
-        conditioning_dist: 'gaussian' (default) or 'uniform' - which distribution
-            to draw the Monte-Carlo conditioning values from. Default to Gaussian.
+        conditioning_dist: which distribution to draw the Monte-Carlo
+            conditioning values from - 'gaussian' (default), 'prior',
+            'uniform', or 'fixed' for no marginalization at all, which
+            takes its single value from cond_value.
+        cond_value: the conditioning value for conditioning_dist='fixed';
+            required there and ignored otherwise.
         return_log_prob: If True, also return the log-density of each
             posterior sample under the model (log q(theta | conditioning)).
         batch_size: Max conditioning draws per model call.
@@ -414,16 +426,36 @@ def sample_posterior(
     elif conditioning_dist == 'uniform':
         cond_mc = _uniform_conditioning_draws(
             target, n_mc_conditioning, n_sigma=prior_n_sigma)
+    elif conditioning_dist == 'fixed':
+        # No marginalization: one conditioning value, every draw taken
+        # at it. For a model whose conditioning axis is not the target's
+        # measured r_half - the Zhao scale radius of a free-light-profile
+        # model, say - there is no measurement uncertainty here to
+        # marginalize over, and reusing the r_half Gaussian would spread
+        # draws over the wrong quantity.
+        if cond_value is None:
+            raise ValueError(
+                "conditioning_dist='fixed' requires cond_value")
+        cond_mc = np.array([float(cond_value)])
     else:
         raise ValueError(
-            f'conditioning_dist={conditioning_dist} not recognized;'
-            f'must be "gaussian", "prior" or "uniform".'
+            f'conditioning_dist={conditioning_dist} not recognized; '
+            f'must be "gaussian", "prior", "uniform" or "fixed".'
         )
+
+    # Extra conditioning axes the model takes but that are held fixed
+    # (a pinned light profile, say) are appended here and dropped again
+    # below: they are model inputs, not inferred quantities, so they
+    # must not widen the box or become posterior columns. A prior with
+    # none of them returns cond_mc unchanged.
+    cond_mc = prior.expand_conditioning(cond_mc)
 
     out = _sample_posterior_mc(
         model, prior, target, norm_dict, pre_transforms, cond_mc, n_samples,
         return_log_prob=return_log_prob, batch_size=batch_size)
     post_all, cond_all, log_q_all = out if return_log_prob else (*out, None)
+    if cond_all.ndim > 1:
+        cond_all = cond_all[:, 0]
 
     # Convert first, then cut in box space via prior.in_prior_box.
     # Under RADIUS_UNITS='kpc' a [-1, 1] cut on normalized theta cannot

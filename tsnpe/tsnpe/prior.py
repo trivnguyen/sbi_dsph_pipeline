@@ -31,6 +31,18 @@ multiplies it by r_star itself -- so it is never listed.
 
 The conditioning axis is always log10(r_half / kpc), taken from the
 target rather than drawn, and named `stellar_log_rstar`.
+
+Fixed conditioning columns
+--------------------------
+Some models are conditioned on more than that one axis -- the
+11-parameter Zhao-tracer family also takes (alpha, beta, gamma)_star,
+the shape of the light profile. When those extra axes are *held fixed*
+(e.g. pinned to Zhao's (2, 5, 0), which is a Plummer sphere), they carry
+no information and must not become posterior columns: `fixed_cond` holds
+them, `expand_conditioning` appends them to the drawn axis on the way
+into the model, and the box, the posterior and everything downstream
+stay exactly as wide as they are for a scalar-conditioned model. A Prior
+with no `fixed_cond` is bit-identical to one from before this existed.
 """
 
 import numpy as np
@@ -96,6 +108,16 @@ class Prior:
         cond_name: Name of the conditioning axis.
         kpc_offset_names: Parameters the model predicts in kpc although
             the box holds them relative to r_star (see module docstring).
+        fixed_cond: Extra conditioning axes held at a constant value,
+            as name -> value, appended after `cond_name` in the order
+            given. Not part of the box and never a posterior column;
+            see the module docstring.
+        cond_bounds: (min, max) for the conditioning axis, replacing the
+            window `conditioning_bounds` derives from the target's
+            measured r_half. Needed when the axis is not that r_half -
+            a free-light-profile model conditions on its tracer's Zhao
+            *scale* radius, so a window centred on r_half would reject
+            every draw.
 
     Raises:
         ValueError: On unknown or inconsistent legacy keywords, a bounds
@@ -106,7 +128,8 @@ class Prior:
 
     def __init__(self, prior_min=None, prior_max=None, radius_units=None,
                  sim_variant=None, *, model_spec=None, param_names=None,
-                 cond_name=CONDITIONING_NAME, kpc_offset_names=None):
+                 cond_name=CONDITIONING_NAME, kpc_offset_names=None,
+                 fixed_cond=None, cond_bounds=None):
         if model_spec is None:
             model_spec, param_names, kpc_offset_names = self._resolve_legacy(
                 radius_units, sim_variant, param_names, kpc_offset_names)
@@ -125,6 +148,21 @@ class Prior:
                 f'cond_name {cond_name!r} collides with a parameter')
         self.kpc_offset_indices = tuple(
             self.param_names.index(n) for n in self.kpc_offset_names)
+
+        fixed_cond = dict(fixed_cond or {})
+        self.fixed_cond = fixed_cond
+        self.fixed_cond_names = tuple(fixed_cond)
+        self.cond_bounds = (
+            None if cond_bounds is None
+            else (float(cond_bounds[0]), float(cond_bounds[1])))
+        self.fixed_cond_values = np.array(
+            [float(v) for v in fixed_cond.values()], dtype=float)
+        clash = set(self.fixed_cond_names) & (
+            set(self.param_names) | {cond_name})
+        if clash:
+            raise ValueError(
+                f'fixed_cond names {sorted(clash)} collide with a '
+                f'parameter or with cond_name {cond_name!r}')
 
         if prior_min is None or prior_max is None:
             if self.param_names != tuple(PARAM_NAMES):
@@ -184,6 +222,36 @@ class Prior:
                 f'{label} is missing {missing}; give every parameter')
 
     @property
+    def cond_names(self) -> tuple:
+        """Every conditioning axis the model takes, in model order.
+
+        The drawn axis first, then any `fixed_cond` ones. This is what
+        the model's conditional_mlp expects, and what norm_dict's
+        cond_loc/cond_scale are indexed by -- not `all_names`, which
+        describes the box and stops at the drawn axis.
+        """
+        return (self.cond_name,) + self.fixed_cond_names
+
+    def expand_conditioning(self, cond: np.ndarray) -> np.ndarray:
+        """Append the fixed conditioning columns to drawn values.
+
+        Args:
+            cond: (N,) draws of the conditioning axis.
+
+        Returns:
+            `cond` unchanged when there are no fixed columns -- so a
+            scalar-conditioned run is untouched -- else an
+            (N, 1 + len(fixed_cond)) array whose first column is `cond`
+            and whose remaining columns are constant.
+        """
+        cond = np.asarray(cond, dtype=float)
+        if not self.fixed_cond_names:
+            return cond
+        fixed = np.broadcast_to(
+            self.fixed_cond_values, (len(cond), len(self.fixed_cond_values)))
+        return np.concatenate([cond.reshape(-1, 1), fixed], axis=1)
+
+    @property
     def radius_units(self) -> str:
         """'kpc' if the model predicts dm_log_rdm in kpc, else 'rstar'.
 
@@ -209,6 +277,9 @@ class Prior:
             'prior_min': {n: float(v) for n, v in self.prior_min_dict.items()},
             'prior_max': {n: float(v) for n, v in self.prior_max_dict.items()},
             'kpc_offset_names': list(self.kpc_offset_names),
+            'fixed_cond': {n: float(v) for n, v in self.fixed_cond.items()},
+            'cond_bounds': (None if self.cond_bounds is None
+                            else list(self.cond_bounds)),
         }
 
     @classmethod
@@ -232,6 +303,8 @@ class Prior:
                 param_names=tuple(config.get('param_names') or PARAM_NAMES),
                 cond_name=config.get('cond_name', CONDITIONING_NAME),
                 kpc_offset_names=tuple(config.get('kpc_offset_names') or ()),
+                fixed_cond=config.get('fixed_cond') or None,
+                cond_bounds=config.get('cond_bounds') or None,
                 **bounds)
         return cls(radius_units=config.get('radius_units'),
                    sim_variant=config.get('sim_variant'), **bounds)
@@ -278,6 +351,8 @@ class Prior:
         Returns:
             (log_min, log_max) bounds for the conditioning dimension.
         """
+        if self.cond_bounds is not None:
+            return self.cond_bounds
         err = 0.5 * (target.rhalf_kpc_em + target.rhalf_kpc_ep)
         return (
             float(np.log10(target.rhalf_kpc - n_sigma * err)),
