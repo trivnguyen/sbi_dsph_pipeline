@@ -30,7 +30,8 @@ import torch
 from ml_collections import ConfigDict
 
 from jgnn import datasets
-from jgnn.models import NPE, GNNEmbedding
+from jgnn.models import (NPE, GNNEmbedding, GNNSummaryEmbedding, SummaryEmbedding,
+                         SetTransformerEmbedding, DeepSetsEmbedding)
 from jgnn.transforms import build_transformation
 
 # Root holding every dwarf-galaxy NPE run: <WORKDIR>/<wandb_project>/
@@ -141,7 +142,7 @@ def _build_npe(config: ConfigDict, ckpt_path: str | Path):
     norm_dict = ckpt['hyper_parameters']['norm_dict']
     print(f'loaded {Path(ckpt_path).name} (epoch {ckpt.get("epoch", "?")})')
 
-    embedding_nn = GNNEmbedding(
+    embedding_kwargs = dict(
         input_size=config.model.input_size,
         gnn_args=config.model.embedding.gnn,
         mlp_args=config.model.embedding.mlp,
@@ -149,6 +150,22 @@ def _build_npe(config: ConfigDict, ckpt_path: str | Path):
             'conditional_mlp', None),
         optimizer_args=None, scheduler_args=None, pre_transforms=None,
     )
+    embedding_type = config.model.embedding.get('type', 'gnn')
+    if embedding_type == 'gnn_summary':
+        embedding_nn = GNNSummaryEmbedding(
+            summary_args=config.model.embedding.summary, **embedding_kwargs)
+    elif embedding_type == 'set_transformer':
+        embedding_nn = SetTransformerEmbedding(
+            set_transformer_args=config.model.embedding.set_transformer,
+            **embedding_kwargs)
+    elif embedding_type == 'deepsets':
+        embedding_nn = DeepSetsEmbedding(
+            deepsets_args=config.model.embedding.deepsets, **embedding_kwargs)
+    elif embedding_type == 'summary':
+        embedding_nn = SummaryEmbedding(
+            summary_args=config.model.embedding.summary, **embedding_kwargs)
+    else:
+        embedding_nn = GNNEmbedding(**embedding_kwargs)
     pre_transforms = build_transformation(
         norm_dict=norm_dict, **config.pre_transforms)
     model = NPE(

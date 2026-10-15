@@ -21,7 +21,8 @@ from ml_collections import config_flags
 
 import dsph_sims
 from jgnn import datasets, training
-from jgnn.models import NPE, GNNEmbedding
+from jgnn.models import (NPE, GNNEmbedding, GNNSummaryEmbedding, SummaryEmbedding,
+                         SetTransformerEmbedding, DeepSetsEmbedding)
 from jgnn.transforms import build_transformation
 from jgnn.callbacks.visualization import NPEVisualizationCallback
 
@@ -140,6 +141,49 @@ def create_embedding_network(config: ml_collections.ConfigDict):
     print("[Embedding] Creating GNN Embedding model...")
 
     model_type = config.model.embedding.get('type', 'gnn')
+    if model_type == 'gnn_summary':
+        # GNN + MLP over the binned-moment summaries that
+        # pre_transforms.apply_summary puts on each graph.
+        return GNNSummaryEmbedding(
+            summary_args=config.model.embedding.summary,
+            input_size=config.model.input_size,
+            gnn_args=config.model.embedding.gnn,
+            mlp_args=config.model.embedding.mlp,
+            conditional_mlp_args=config.model.embedding.get(
+                'conditional_mlp', None),
+            optimizer_args=None, scheduler_args=None, pre_transforms=None,
+        )
+    if model_type == 'set_transformer':
+        # Self-attention over the stars + attention pooling; no graph.
+        return SetTransformerEmbedding(
+            set_transformer_args=config.model.embedding.set_transformer,
+            input_size=config.model.input_size,
+            mlp_args=config.model.embedding.mlp,
+            conditional_mlp_args=config.model.embedding.get(
+                'conditional_mlp', None),
+            optimizer_args=None, scheduler_args=None, pre_transforms=None,
+        )
+    if model_type == 'deepsets':
+        # Per-star MLP, sum pooling with log N; no graph.
+        return DeepSetsEmbedding(
+            deepsets_args=config.model.embedding.deepsets,
+            input_size=config.model.input_size,
+            mlp_args=config.model.embedding.mlp,
+            conditional_mlp_args=config.model.embedding.get(
+                'conditional_mlp', None),
+            optimizer_args=None, scheduler_args=None, pre_transforms=None,
+        )
+    if model_type == 'summary':
+        # Summary-only context (no graph, no GNN): the oracle
+        # sufficient-statistic test of the gap project.
+        return SummaryEmbedding(
+            summary_args=config.model.embedding.summary,
+            input_size=config.model.input_size,
+            mlp_args=config.model.embedding.mlp,
+            conditional_mlp_args=config.model.embedding.get(
+                'conditional_mlp', None),
+            optimizer_args=None, scheduler_args=None, pre_transforms=None,
+        )
     return GNNEmbedding(
         input_size=config.model.input_size,
         gnn_args=config.model.embedding.gnn,
