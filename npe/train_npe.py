@@ -6,7 +6,8 @@ import shutil
 import sys
 from pathlib import Path
 
-os.environ['WANDB_DATA_DIR'] = '/scratch/tvnguyen/wandb_data'
+# Reason: Trillium default; machines without /scratch (tucana) set it.
+os.environ.setdefault('WANDB_DATA_DIR', '/scratch/tvnguyen/wandb_data')
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -80,7 +81,8 @@ def prepare_data(config: ml_collections.ConfigDict, norm_dict=None):
         config.num_datasets,
         init=config.get('init', 0),
         is_directory=True,
-        concat=True
+        concat=True,
+        dtype=config.get('data_dtype', 'float32'),
     )
 
     train_loader, val_loader, norm_dict = datasets.cartesian.prepare_dataloaders(
